@@ -62,6 +62,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Request, HTTPException
 import uvicorn
 
+from core.safety import Sentinel
+from core.styleguard import StyleGuard
+
+styleguard: Optional[StyleGuard] = None
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -1345,30 +1349,37 @@ async def webhook(req: Request):
         image_context=data.get("image"),
     )
     return {"ok": True, "dry_run": DRY_RUN}
-
-
 # =============================================================================
 # MAIN
 # =============================================================================
-
-async def _safe_publish(publisher: Publisher, source: str) -> None:
-    try:
-        await publisher.publish(source=source)
-    except Exception as e:
-        log.exception("publish crashed: %s", e)
-
+async def _safe_publish(publisher: Publisher, sentinel: Sentinel, source: str) -> None:
+    
+    """Обёртка для плановых публикаций с защитой Sentinel."""
+    await sentinel.safe_execute(publisher.publish(source=source), context=source)
 
 async def run_scheduler_forever() -> None:
     publisher = Publisher()
     _publisher_holder["p"] = publisher
 
+    # === Новые стражи ===
+    sentinel = Sentinel(
+        bot=publisher.bot,
+        channel_id=publisher._target_chat(),
+        owner_chat_id=int(OWNER_CHAT_ID),
+        fallback_file=str(ROOT / "fallback_lessons.json")   # ← абсолютный путь
+    )
+    global styleguard
+    styleguard = StyleGuard(
+        forbidden_words_file=str(ROOT / "forbidden_words.json")
+    )
+
     sched = AsyncIOScheduler(timezone=SCHEDULER_TZ)
     sched.add_job(_safe_publish, "cron",
                   hour=POST_MORNING_HOUR, minute=0,
-                  args=[publisher, "scheduled_morning"])
+                  args=[publisher, sentinel, "scheduled_morning"])
     sched.add_job(_safe_publish, "cron",
                   hour=POST_EVENING_HOUR, minute=0,
-                  args=[publisher, "scheduled_evening"])
+                  args=[publisher, sentinel, "scheduled_evening"])
 
     # news scan job — включается только если ENABLE_NEWS=true в .env
     try:

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Наставник — Панель управления</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 2em; background: #1a1a2e; color: #eee; }
+        .container { max-width: 600px; margin: auto; }
+        .stat { background: #16213e; padding: 1em; border-radius: 8px; margin-bottom: 1em; }
+        button { background: #e94560; color: white; border: none; padding: 0.7em 1.4em; border-radius: 5px; margin: 0.3em; cursor: pointer; }
+        textarea { width: 100%; margin-top: 1em; background: #0f3460; color: white; border: 1px solid #e94560; padding: 0.5em; border-radius: 5px; }
+        .message { padding: 0.5em; border-radius: 5px; margin-top: 1em; }
+        .success { background: #1b4332; color: #b7e4c7; }
+        .error { background: #5c1a1a; color: #f8d7da; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧠 Пульт AI-Наставника</h1>
+        <div class="stat">
+            📊 <strong>Статистика постов (с последнего сброса)</strong><br>
+            Рыночные: {{ stats.market }} | Новостные: {{ stats.news }} | Обучение: {{ stats.education }} | Всего: {{ stats.total }}<br>
+            <small>Канал: {{ channel_id }} | Обновлено: {{ last_updated }}</small>
+        </div>
+
+        <h3>Принудительная публикация</h3>
+        <form id="postForm">
+            <label>Тип поста:</label><br>
+            <button type="button" onclick="setPostType('market')">📈 Рынок</button>
+            <button type="button" onclick="setPostType('news')">📰 Новости</button>
+            <button type="button" onclick="setPostType('education')">📘 Обучение</button>
+            <br><br>
+            <input type="hidden" id="postType" name="post_type" value="education">
+            <label>Или вставьте свой текст (будет опубликован как есть):</label><br>
+            <textarea id="draftText" name="draft_text" rows="6" placeholder="Введите текст поста..."></textarea><br>
+            <button type="submit">🚀 Отправить в канал</button>
+        </form>
+        <div id="msg"></div>
+    </div>
+
+    <script>
+        function setPostType(type) {
+            document.getElementById('postType').value = type;
+            // Подсветка активной кнопки (простой вариант)
+            document.querySelectorAll('button[type="button"]').forEach(b => b.style.background='#e94560');
+            event.target.style.background = '#ff6b6b';
+        }
+
+        document.getElementById('postForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData();
+            formData.append('post_type', document.getElementById('postType').value);
+            formData.append('draft_text', document.getElementById('draftText').value);
+
+            const resp = await fetch('/force_post', { method: 'POST', body: formData });
+            const data = await resp.json();
+            const msgDiv = document.getElementById('msg');
+            if (data.status === 'ok') {
+                msgDiv.className = 'message success';
+                msgDiv.textContent = '✅ ' + data.detail;
+            } else {
+                msgDiv.className = 'message error';
+                msgDiv.textContent = '❌ ' + data.detail;
+            }
+            // Очищаем поле черновика
+            document.getElementById('draftText').value = '';
+        });
+    </script>
+</body>
+</html>
