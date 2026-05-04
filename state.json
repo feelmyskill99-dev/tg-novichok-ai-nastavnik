@@ -1,0 +1,459 @@
+{
+  "post_count": 16,
+  "last_image_at": 16,
+  "last_partner_at": 16,
+  "content_mix_log": [
+    {
+      "timestamp": "2026-04-26T05:25:31+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Crypto is built for AI agents, not humans, says Alchemy's CEO",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-26T06:04:31+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Crypto is built for AI agents, not humans, says Alchemy's CEO",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-26T06:25:39+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "US DOJ sentences man to 70 months in prison for role in $263M scam group",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-26T07:00:39+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "BTC выше EMA, RSI 63, но объёмов нет — наблюдаем",
+      "source": "scheduled_morning"
+    },
+    {
+      "timestamp": "2026-04-26T09:00:41+00:00",
+      "post_type": "author_note",
+      "category": "author_note",
+      "published_to": "owner",
+      "title": "almost_believed",
+      "source": "author_note_cli"
+    },
+    {
+      "timestamp": "2026-04-26T14:26:10+00:00",
+      "post_type": "regulation_etf_institutional",
+      "category": "news",
+      "published_to": "owner",
+      "title": "MiCA's not enough: Bybit CEO says firms need other licenses to turn a profit in Europe",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-26T14:37:22+00:00",
+      "post_type": "regulation_etf_institutional",
+      "category": "news",
+      "published_to": "channel",
+      "title": "MiCA's not enough: Bybit CEO says firms need other licenses to turn a profit in Europe",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-26T15:26:14+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Your AI Agent Can Now Groan While Untangling Your Vibe Coded Mess",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-26T16:01:18+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "BTC в нейтральной зоне, ждать без действия — тоже навык",
+      "source": "scheduled_evening"
+    },
+    {
+      "timestamp": "2026-04-26T16:26:12+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Aave raises nearly 80% of the $200 million it needs to cover bad debt left by Kelp DAO exploit",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-26T17:26:08+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Why DeFi isn't dead despite massive exploits and $13 billion investor exodus",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-26T18:59:54+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Why DeFi isn't dead despite massive exploits and $13 billion investor exodus",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-26T20:11:28+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Aave raises nearly 80% of the $200 million it needs to cover bad debt left by Kelp DAO exploit",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T04:26:09+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Western Union to launch stablecoin next month, with ‘Stable Card’ planned for global consumers",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T05:02:34+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Western Union to launch stablecoin next month, with ‘Stable Card’ planned for global consumers",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T05:26:13+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Aave asks Arbitrum to send 30K ETH from Kelp exploiter to ‘DeFi United’",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T06:26:11+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Western Union eyes May for its stablecoin USDPT rollout",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T07:00:26+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 39 — не сигнал к покупке, нужен контекст индикаторов",
+      "source": "scheduled_morning"
+    },
+    {
+      "timestamp": "2026-04-27T08:12:50+00:00",
+      "post_type": "macro",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Global interest rates, Robinhood, Galaxy earnings: Crypto Week Ahead",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T08:15:09+00:00",
+      "post_type": "author_note",
+      "category": "author_note",
+      "published_to": "owner",
+      "title": "what_i_understood",
+      "source": "author_note_cli"
+    },
+    {
+      "timestamp": "2026-04-27T08:29:35+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 38 — не сигнал, боковик седьмой день, скука опасна",
+      "source": "manual"
+    },
+    {
+      "timestamp": "2026-04-27T09:00:44+00:00",
+      "post_type": "author_note",
+      "category": "author_note",
+      "published_to": "owner",
+      "title": "hamster_dialog",
+      "source": "author_note_cli"
+    },
+    {
+      "timestamp": "2026-04-27T10:16:31+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Western Union to Launch Solana-Based Stablecoin Plus ‘Stable Card’ Next Month",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T10:26:42+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Western Union to Launch Solana-Based Stablecoin Plus ‘Stable Card’ Next Month",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T11:16:26+00:00",
+      "post_type": "regulation_etf_institutional",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Bitcoin leads $1.2B weekly haul for global crypto funds as institutional demand builds: CoinShares",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T13:16:37+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "MiCA-licensed Banking Circle joins bank stablecoin settlement race in Europe",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T13:42:54+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "channel",
+      "title": "MiCA-licensed Banking Circle joins bank stablecoin settlement race in Europe",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T14:12:05+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Morning Minute: NFTs Storm Back, Led by Bored Apes",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T15:16:37+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "MiCA has made euro stablecoins safe but weak, new report argues",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T15:35:43+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "channel",
+      "title": "MiCA has made euro stablecoins safe but weak, new report argues",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T16:00:48+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 28 — не сигнал к покупке, нужен контекст и стоп",
+      "source": "scheduled_evening"
+    },
+    {
+      "timestamp": "2026-04-27T17:16:32+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Litecoin Rewrites Transaction History After Exploit, Apologizes for Social Posts",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T17:33:42+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Litecoin Rewrites Transaction History After Exploit, Apologizes for Social Posts",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T18:16:43+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Malicious Web Pages Are Hijacking AI Agents, And Some Are Going After Your PayPal",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T18:18:20+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Malicious Web Pages Are Hijacking AI Agents, And Some Are Going After Your PayPal",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T19:07:54+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Crypto Exchange Gemini Launches Agentic Trading Feature for AI Agents",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-27T19:09:42+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 32 — не сигнал к покупке, важен контекст EMA и тренда",
+      "source": "manual"
+    },
+    {
+      "timestamp": "2026-04-27T19:11:54+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Crypto Exchange Gemini Launches Agentic Trading Feature for AI Agents",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-27T21:57:53+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Aave-Led 'DeFi United' Relief Effort Raises $300 Million to Cover Kelp DAO Exploit Losses",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-28T00:57:55+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Western Union eyeing stablecoin launch to settle global transactions without SWIFT, CEO says",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-28T02:57:55+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Taylor Swift Seeks Trademarks for Her Voice and Image to Fight AI Fakes",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-28T03:50:27+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "channel",
+      "title": "Taylor Swift Seeks Trademarks for Her Voice and Image to Fight AI Fakes",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-28T07:00:41+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 36 — не сигнал к покупке, если EMA давят сверху",
+      "source": "scheduled_morning"
+    },
+    {
+      "timestamp": "2026-04-28T09:02:33+00:00",
+      "post_type": "author_note",
+      "category": "author_note",
+      "published_to": "owner",
+      "title": "almost_believed",
+      "source": "author_note_cli"
+    },
+    {
+      "timestamp": "2026-04-28T16:04:25+00:00",
+      "post_type": "fallback_education",
+      "category": "education",
+      "published_to": "channel",
+      "title": "Плечо x10 сокращает расстояние до ликвидации, не только умножает прибыль",
+      "source": "scheduled_evening"
+    },
+    {
+      "timestamp": "2026-04-29T08:13:02+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "owner",
+      "title": "AI Agent Deletes Startup’s Database in 9 Seconds, Founder Says",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-29T08:39:58+00:00",
+      "post_type": "ai_crypto",
+      "category": "news",
+      "published_to": "channel",
+      "title": "AI Agent Deletes Startup’s Database in 9 Seconds, Founder Says",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-04-29T09:01:01+00:00",
+      "post_type": "author_note",
+      "category": "author_note",
+      "published_to": "owner",
+      "title": "hamster_dialog",
+      "source": "author_note_cli"
+    },
+    {
+      "timestamp": "2026-04-29T16:03:49+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 35 под двумя EMA — не сигнал к покупке, а контекст давления",
+      "source": "scheduled_evening"
+    },
+    {
+      "timestamp": "2026-04-30T00:12:58+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "owner",
+      "title": "SWEAT protocol thwarts multi-million dollar exploit, restores user balances",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-30T01:13:13+00:00",
+      "post_type": "regulation_etf_institutional",
+      "category": "news",
+      "published_to": "owner",
+      "title": "Bitcoin falls as traders cut risk ahead of FOMC: Will TradFi, spot ETF volumes bolster $70K support?",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-04-30T04:18:02+00:00",
+      "post_type": "security_hacks_scams",
+      "category": "news",
+      "published_to": "channel",
+      "title": "SWEAT protocol thwarts multi-million dollar exploit, restores user balances",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-05-02T07:02:02+00:00",
+      "post_type": "market",
+      "category": "market_chart",
+      "published_to": "channel",
+      "title": "RSI 60 выше EMA — не разрешение входить без стопа",
+      "source": "scheduled_morning"
+    },
+    {
+      "timestamp": "2026-05-02T07:28:15+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "owner",
+      "title": "CLARITY Act stablecoin yield rules finalized: ‘Go time’ for crypto bill",
+      "source": "news_scan"
+    },
+    {
+      "timestamp": "2026-05-02T08:06:40+00:00",
+      "post_type": "stablecoins",
+      "category": "news",
+      "published_to": "channel",
+      "title": "CLARITY Act stablecoin yield rules finalized: ‘Go time’ for crypto bill",
+      "source": "news_callback"
+    },
+    {
+      "timestamp": "2026-05-02T09:02:22+00:00",
+      "post_type": "author_note",
+      "category": "author_note",
+      "published_to": "owner",
+      "title": "embarrassing_thought",
+      "source": "author_note_cli"
+    }
+  ],
+  "trade_message_index": {
+    "49": "2d18dd36f0fd",
+    "81": "9c69e3c857ab"
+  }
+}
