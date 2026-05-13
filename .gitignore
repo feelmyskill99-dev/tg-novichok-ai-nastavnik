@@ -5,3 +5,26 @@ __pycache__/
 venv/
 outputs/
 *.log
+
+# Runtime state (json_store atomic write + межпроцессный lock — этап 1.1)
+*.lock
+*.corrupt.*.json
+backups/
+
+# Runtime data accumulated by bot (state machines, drafts, caches, journals)
+state.json
+history.json
+news_cache.json
+news_history.json
+news_drafts.json
+author_notes_drafts.json
+weekly_diary_drafts.json
+paper_trades.json
+trade_journal.json
+confirm_trades.json
+live_trades.json
+live_trade_journal.json
+mistake_tracker_state.json
+
+# Локальные experiment-сниппеты
+admin.html

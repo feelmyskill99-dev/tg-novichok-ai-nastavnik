@@ -23,6 +23,7 @@ from typing import Optional
 
 from anthropic import Anthropic
 
+from core.json_store import load_json, save_json
 from .analyzer import build_system_prompt
 from .config import NewsConfig
 from .models import NewsItem
@@ -47,6 +48,8 @@ class NewsDraft:
     # Stage 12b — генерация картинок
     image_path: str = ""                 # абсолютный путь к сохранённой картинке (или "")
     guard_reasons: list[str] = field(default_factory=list)  # причины блокировки автопубликации
+    # Stage 14 — формат поста. "v2" для новых, "v1" для старых draft'ов из json.
+    schema_version: str = "v2"
     # Stage 12e — source image strategy + audit
     image_origin: str = "none"           # source_preview | generated_ai | manual_upload | none
     image_source_url: str = ""           # URL og:image/twitter:image, если origin=source_preview
@@ -74,21 +77,10 @@ class DraftStore:
         self.path = path
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, list) else []
-        except Exception as e:
-            log.warning("news_drafts.json повреждён: %s", e)
-            return []
+        return load_json(self.path, default=[], expected_type=list)
 
     def _save(self, records: list[dict]) -> None:
-        records = records[-MAX_DRAFTS:]
-        self.path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_json(self.path, records[-MAX_DRAFTS:])
 
     def list_all(self) -> list[NewsDraft]:
         return [NewsDraft.from_dict(d) for d in self._load()]
@@ -175,11 +167,13 @@ def create_draft_from(
     image_prompt: str = "",
     image_model: str = "",
     image_created_at: str = "",
+    schema_version: str = "v2",
 ) -> NewsDraft:
     return NewsDraft(
         draft_id=_make_draft_id(item),
         created_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
         status="pending_review",
+        schema_version=schema_version,
         source_news={
             "id": item.id,
             "title": item.title,

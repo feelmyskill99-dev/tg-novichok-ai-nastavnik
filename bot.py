@@ -66,6 +66,22 @@ import uvicorn
 from core.safety import Sentinel
 from core.styleguard import StyleGuard
 from core.mistake_tracker import MistakeTracker
+from core.json_store import load_json, save_json, update_json
+from core.publish_lock import try_claim_for_publishing, release_claim
+from core.telegram_send import split_html_for_telegram
+from core.content_mix import (
+    CATEGORY_MAP as _CM_CATEGORY_MAP,
+    CONTENT_MIX_CHANNEL_MODE_MIN as _CM_CHANNEL_MODE_MIN,
+    CONTENT_MIX_FALLBACK_RECOMMEND as _CM_FALLBACK,
+    CONTENT_MIX_LOG_CAP as _CM_LOG_CAP,
+    CONTENT_MIX_LOW_DATA_THRESHOLD as _CM_LOW_DATA,
+    CONTENT_MIX_OVERREP_DELTA as _CM_OVER_DELTA,
+    CONTENT_MIX_TARGET as _CM_TARGET,
+    CONTENT_MIX_UNDERREP_DELTA as _CM_UNDER_DELTA,
+    CONTENT_MIX_WINDOW_DAYS as _CM_WINDOW_DAYS,
+    category_for as _cm_category_for,
+    compute_mix as _cm_compute_mix,
+)
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -188,6 +204,7 @@ log = logging.getLogger("bot")
 # с ротацией (5 файлов по 2 MB).
 try:
     from logging.handlers import RotatingFileHandler
+    from core.log_redact import RedactFilter
     _log_file = OUTPUTS / "scheduler.log"
     _file_handler = RotatingFileHandler(
         str(_log_file), maxBytes=2_000_000, backupCount=5, encoding="utf-8"
@@ -195,7 +212,13 @@ try:
     _file_handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s — %(message)s"
     ))
+    # Этап 1.7: redact-фильтр на root-уровне — покрывает все handlers.
+    _redact = RedactFilter()
+    logging.getLogger().addFilter(_redact)
+    for _h in logging.getLogger().handlers:
+        _h.addFilter(_redact)
     logging.getLogger().addHandler(_file_handler)
+    _file_handler.addFilter(_redact)
     log.info("file logging → %s", _log_file)
 except Exception as _e:  # pragma: no cover — лог-файл не должен блокировать запуск
     log.warning("file logging setup failed: %s", _e)
@@ -204,42 +227,19 @@ except Exception as _e:  # pragma: no cover — лог-файл не долже�
 # STATE & HISTORY
 # =============================================================================
 
+_STATE_DEFAULT = {"post_count": 0, "last_image_at": 0, "last_partner_at": 0}
+
+
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-            log.warning("state.json: ожидался object, получен %s — backup и сброс", type(data).__name__)
-        except Exception as e:
-            log.warning("state.json повреждён (%s) — backup и сброс", e)
-        # повреждён → backup state.corrupt.<ts>.json и возвращаем дефолт
-        try:
-            ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            backup_path = STATE_FILE.with_name(f"state.corrupt.{ts}.json")
-            backup_path.write_bytes(STATE_FILE.read_bytes())
-            log.warning("state.json corruption backup → %s", backup_path)
-        except Exception as e2:
-            log.warning("state.json: backup не удался: %s", e2)
-    return {"post_count": 0, "last_image_at": 0, "last_partner_at": 0}
+    return load_json(STATE_FILE, default=dict(_STATE_DEFAULT), expected_type=dict)
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    save_json(STATE_FILE, state)
 
 
 def load_history() -> list:
-    if HISTORY_FILE.exists():
-        try:
-            data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-        except Exception:
-            log.warning("history.json повреждён, сбрасываю")
-    return []
+    return load_json(HISTORY_FILE, default=[], expected_type=list)
 
 
 # =============================================================================
@@ -256,67 +256,19 @@ def load_history() -> list:
 #   - иначе → используем все события (owner+channel) — чтобы статистика не была пустой
 #     в DRY_RUN/preview-режиме.
 
-CONTENT_MIX_TARGET: dict[str, float] = {
-    "market_chart": 0.40,
-    "education":    0.20,
-    "news":         0.15,
-    "author_note":  0.15,
-    "trade_diary":  0.10,
-}
-CONTENT_MIX_WINDOW_DAYS = 7
-CONTENT_MIX_LOG_CAP = 500
-CONTENT_MIX_OVERREP_DELTA = 0.10
-CONTENT_MIX_UNDERREP_DELTA = 0.07
-CONTENT_MIX_CHANNEL_MODE_MIN = 3
-CONTENT_MIX_LOW_DATA_THRESHOLD = 3
-CONTENT_MIX_FALLBACK_RECOMMEND = "education"
+# Этап 2.2: константы и CATEGORY_MAP теперь в core/content_mix.py — алиасы
+# для существующего кода bot.py (compute_content_mix, _content_mix_hint_block).
+CONTENT_MIX_TARGET = _CM_TARGET
+CONTENT_MIX_WINDOW_DAYS = _CM_WINDOW_DAYS
+CONTENT_MIX_LOG_CAP = _CM_LOG_CAP
+CONTENT_MIX_OVERREP_DELTA = _CM_OVER_DELTA
+CONTENT_MIX_UNDERREP_DELTA = _CM_UNDER_DELTA
+CONTENT_MIX_CHANNEL_MODE_MIN = _CM_CHANNEL_MODE_MIN
+CONTENT_MIX_LOW_DATA_THRESHOLD = _CM_LOW_DATA
+CONTENT_MIX_FALLBACK_RECOMMEND = _CM_FALLBACK
+CATEGORY_MAP = _CM_CATEGORY_MAP
 
-# raw post_type → canonical category. Свёрнутые синонимы из всех модулей проекта.
-CATEGORY_MAP: dict[str, str] = {
-    # market_chart
-    "market":           "market_chart",
-    "btc_overview":     "market_chart",
-    "chart_analysis":   "market_chart",
-    "flash":            "market_chart",
-    # education
-    "education":            "education",
-    "fallback_education":   "education",
-    "glossary":             "education",
-    "term_without_pain":    "education",
-    "anti_signal":          "education",
-    "risk_management":      "education",
-    # news (включая sector-уровень из news/)
-    "news":                       "news",
-    "news_analysis":              "news",
-    "ai_crypto":                  "news",
-    "political_market_noise":     "news",
-    "scam_radar":                 "news",
-    "security_news":              "news",
-    "security_hacks_scams":       "news",
-    "stablecoins":                "news",
-    "rwa":                        "news",
-    "rwa_tokenization":           "news",
-    "depin":                      "news",
-    "depin_infrastructure":       "news",
-    "regulation_etf_institutional": "news",
-    "macro":                      "news",
-    "memecoins_low_priority":     "news",
-    # author_note
-    "author_note":      "author_note",
-    "personal_note":    "author_note",
-    "what_i_learned":   "author_note",
-    "hamster_dialogue": "author_note",
-    # trade_diary
-    "trade":                "trade_diary",
-    "paper_trade":          "trade_diary",
-    "trade_review":         "trade_diary",
-    "closed_trade":         "trade_diary",
-    "weekly_trade_report":  "trade_diary",
-}
-
-
-def _category_for(post_type: str) -> str:
-    return CATEGORY_MAP.get((post_type or "").lower().strip(), "other")
+_category_for = _cm_category_for
 
 
 def _migrate_content_mix_state_if_needed(s: dict) -> bool:
@@ -396,89 +348,11 @@ def _log_post_event(
 
 
 def compute_content_mix() -> dict:
-    """7-дневная статистика. Подбирает mode=channel если есть >=3 channel-событий,
-    иначе mode=all. Возвращает counts/shares/over/under/recommended/reason.
-    """
+    """7-дневная статистика. Делегирует в core.content_mix.compute_mix."""
     s = load_state()
     _migrate_content_mix_state_if_needed(s)
     save_state(s)
-    log_list = s.get("content_mix_log") or []
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=CONTENT_MIX_WINDOW_DAYS)
-
-    fresh: list[dict] = []
-    for ev in log_list:
-        try:
-            ts = datetime.fromisoformat(ev.get("timestamp") or "")
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= cutoff:
-                fresh.append(ev)
-        except Exception:
-            continue
-
-    channel_only = [e for e in fresh if e.get("published_to") == "channel"]
-    if len(channel_only) >= CONTENT_MIX_CHANNEL_MODE_MIN:
-        events = channel_only
-        mode = "channel"
-    else:
-        events = fresh
-        mode = "all"
-
-    counts: dict[str, int] = {c: 0 for c in CONTENT_MIX_TARGET}
-    other_count = 0
-    for e in events:
-        cat = e.get("category") or "other"
-        if cat in counts:
-            counts[cat] += 1
-        else:
-            other_count += 1
-    target_total = sum(counts.values())   # other не входит в распределение
-    total = target_total + other_count
-
-    shares = {c: (counts[c] / target_total) if target_total > 0 else 0.0 for c in counts}
-
-    over = [c for c in CONTENT_MIX_TARGET
-            if shares[c] > CONTENT_MIX_TARGET[c] + CONTENT_MIX_OVERREP_DELTA]
-    under = [c for c in CONTENT_MIX_TARGET
-             if shares[c] < CONTENT_MIX_TARGET[c] - CONTENT_MIX_UNDERREP_DELTA]
-
-    if total < CONTENT_MIX_LOW_DATA_THRESHOLD:
-        recommended = CONTENT_MIX_FALLBACK_RECOMMEND
-        reason = (f"мало данных ({total} событий за {CONTENT_MIX_WINDOW_DAYS}д) "
-                  f"— fallback на «{CONTENT_MIX_FALLBACK_RECOMMEND}», чтобы канал не был сухим")
-    elif under:
-        worst = sorted(under, key=lambda c: shares[c] - CONTENT_MIX_TARGET[c])[0]
-        recommended = worst
-        deficit = (CONTENT_MIX_TARGET[worst] - shares[worst]) * 100
-        reason = (f"{worst} = {round(shares[worst]*100)}% (цель {round(CONTENT_MIX_TARGET[worst]*100)}%), "
-                  f"дефицит {round(deficit)} п.п.")
-    elif over:
-        # все категории не «underrepresented», но есть «overrepresented» — значит, остальные
-        # либо в норме, либо чуть-чуть недотягивают; рекомендуем не повторять перекос.
-        # Берём категорию с минимальной долей не из over.
-        candidates = [c for c in CONTENT_MIX_TARGET if c not in over]
-        if candidates:
-            recommended = min(candidates, key=lambda c: shares[c] - CONTENT_MIX_TARGET[c])
-        else:
-            recommended = CONTENT_MIX_FALLBACK_RECOMMEND
-        reason = ("есть перекос (" + ", ".join(over) + ") — рекомендуем не повторять, "
-                  f"следующий лучше «{recommended}»")
-    else:
-        recommended = "market_chart"
-        reason = "все категории в пределах коридора — можно обычный рыночный пост"
-
-    return {
-        "mode": mode,
-        "total_posts": total,
-        "counts": counts,
-        "other_count": other_count,
-        "shares": shares,
-        "target": dict(CONTENT_MIX_TARGET),
-        "overrepresented": over,
-        "underrepresented": under,
-        "recommended": recommended,
-        "reason": reason,
-    }
+    return _cm_compute_mix(s.get("content_mix_log") or [])
 
 
 def _content_mix_hint_block(*, allow: bool = True) -> str | None:
@@ -512,13 +386,11 @@ def _content_mix_hint_block(*, allow: bool = True) -> str | None:
 
 
 def append_history(entry: dict, limit: int = HISTORY_LIMIT) -> None:
-    history = load_history()
-    history.append(entry)
-    history = history[-limit:]
-    HISTORY_FILE.write_text(
-        json.dumps(history, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    def _mut(history: list) -> list:
+        history.append(entry)
+        return history[-limit:]
+
+    update_json(HISTORY_FILE, default=[], expected_type=list, mutator=_mut)
 
 
 # =============================================================================
@@ -1224,6 +1096,12 @@ class Publisher:
         self.market = Market()
         self.claude = Anthropic(api_key=CLAUDE_API_KEY)
         self.openai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+        # Этап 1.4: убираем зависимость от глобала. MistakeTracker создаётся
+        # локально, чтобы `--post-now` без scheduler не падал в fallback-ветке.
+        self.mistake_tracker = MistakeTracker(
+            themes_file=str(ROOT / "mistake_themes.json"),
+            state_file=str(ROOT / "mistake_tracker_state.json"),
+        )
 
     def _target_chat(self) -> str:
         if DRY_RUN:
@@ -1289,12 +1167,12 @@ class Publisher:
 
         if mode == "fallback_education":
             # Используем MistakeTracker для равномерного покрытия тем
-            topic = mistake_tracker.get_next_topic()    # ← вызов метода, а не mistake_tracker()
+            topic = self.mistake_tracker.get_next_topic()
             market_snapshot = {"fallback_topic": topic}
             # Запоминаем использование темы
-            for tid, info in mistake_tracker.themes.items():
+            for tid, info in self.mistake_tracker.themes.items():
                 if info["title"] == topic:
-                    mistake_tracker.record_usage(tid)
+                    self.mistake_tracker.record_usage(tid)
                     break
         else:
             last = df.iloc[-1]
@@ -1485,10 +1363,9 @@ async def run_scheduler_forever() -> None:
         fallback_file=str(ROOT / "fallback_lessons.json")
     )
     styleguard = StyleGuard()
-    mistake_tracker = MistakeTracker(
-        themes_file=str(ROOT / "mistake_themes.json"),
-        state_file=str(ROOT / "mistake_tracker_state.json")
-    )
+    # Этап 1.4: глобал mistake_tracker теперь зеркало publisher.mistake_tracker
+    # (Publisher.__init__ создаёт его сам, не зависит от scheduler-инициализации).
+    mistake_tracker = publisher.mistake_tracker
 
     # === Передаём трекер в админ-панель ===
     import admin_panel
@@ -2798,12 +2675,12 @@ def _register_author_note_callbacks(dp: Dispatcher) -> None:
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
-        draft = store.get(draft_id)
-        if not draft:
+        existing = store.get(draft_id)
+        if not existing:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        if existing.status in ("publishing", "published", "rejected"):
+            await cb.answer(f"Уже {existing.status}", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -2833,11 +2710,17 @@ def _register_author_note_callbacks(dp: Dispatcher) -> None:
                 pass
             return
 
+        draft = try_claim_for_publishing(store, draft_id)
+        if draft is None:
+            await cb.answer("Уже публикуется/обработано", show_alert=True)
+            return
+
         try:
             await cb.bot.send_message(CHANNEL_ID, draft.post_html,
                                       parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception as e:
             log.exception("author_publish send to channel failed: %s", e)
+            release_claim(store, draft_id, new_status="pending_review")
             try:
                 await cb.bot.send_message(OWNER_CHAT_ID,
                                           f"❌ Ошибка публикации: {html.escape(str(e), quote=False)}",
@@ -2961,12 +2844,12 @@ def _register_weekly_diary_callbacks(dp: Dispatcher) -> None:
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
-        draft = store.get(draft_id)
-        if not draft:
+        existing = store.get(draft_id)
+        if not existing:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        if existing.status in ("publishing", "published", "rejected"):
+            await cb.answer(f"Уже {existing.status}", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -2997,11 +2880,17 @@ def _register_weekly_diary_callbacks(dp: Dispatcher) -> None:
                 pass
             return
 
+        draft = try_claim_for_publishing(store, draft_id)
+        if draft is None:
+            await cb.answer("Уже публикуется/обработано", show_alert=True)
+            return
+
         try:
             await cb.bot.send_message(CHANNEL_ID, draft.post_html,
                                       parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception as e:
             log.exception("weekly_publish send to channel failed: %s", e)
+            release_claim(store, draft_id, new_status="pending_review")
             try:
                 await cb.bot.send_message(OWNER_CHAT_ID,
                                           f"❌ Ошибка публикации: {html.escape(str(e), quote=False)}",
@@ -4339,12 +4228,17 @@ async def send_post_with_optional_image(
             log.warning("post image_path bad: %s (%s)", image_path, e)
 
     if img is None:
-        await bot.send_message(
-            chat_id, post_html,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_web_page_preview,
-            reply_markup=reply_markup,
-        )
+        chunks = split_html_for_telegram(post_html, limit=TELEGRAM_MESSAGE_LIMIT)
+        if not chunks:
+            return
+        last_idx = len(chunks) - 1
+        for i, chunk in enumerate(chunks):
+            await bot.send_message(
+                chat_id, chunk,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+                reply_markup=reply_markup if i == last_idx else None,
+            )
         return
 
     photo = FSInputFile(str(img))

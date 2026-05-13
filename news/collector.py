@@ -58,7 +58,13 @@ class NewsCollector:
         out: list[NewsItem] = []
         for source, url in RSS_FEEDS.items():
             try:
-                parsed = await asyncio.to_thread(feedparser.parse, url)
+                # Этап 1.6: качаем через httpx с таймаутом, feedparser
+                # парсит уже готовые bytes — не уходит в сеть сам.
+                async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+                    r = await client.get(url, headers={"User-Agent": "ai-deposit-bot/1.0"})
+                    r.raise_for_status()
+                    raw = r.content
+                parsed = await asyncio.to_thread(feedparser.parse, raw)
             except Exception as e:
                 log.warning("RSS %s failed: %s", source, e)
                 continue

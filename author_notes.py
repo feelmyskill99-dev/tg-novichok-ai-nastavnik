@@ -26,6 +26,8 @@ from typing import Awaitable, Callable, Optional
 
 from anthropic import Anthropic
 
+from core.json_store import load_json, save_json
+
 try:
     from style_guides import compose_style_context as _compose_style
 except Exception:   # pragma: no cover
@@ -381,21 +383,10 @@ class AuthorNoteStore:
         self.path = path
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, list) else []
-        except Exception as e:
-            log.warning("author_notes_drafts.json повреждён: %s", e)
-            return []
+        return load_json(self.path, default=[], expected_type=list)
 
     def _save(self, records: list[dict]) -> None:
-        records = records[-MAX_DRAFTS:]
-        self.path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_json(self.path, records[-MAX_DRAFTS:])
 
     def list_all(self) -> list[AuthorNoteDraft]:
         return [AuthorNoteDraft.from_dict(d) for d in self._load()]
