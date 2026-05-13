@@ -1,41 +1,37 @@
-"""
-Автотест здоровья бота.
-Запускать по cron раз в день или чаще.
-"""
+"""Watchdog: проверяет health-status бота и шлёт DM владельцу при проблемах.
 
-import json
+Запускать по cron раз в N часов:
+    python tests/health_check.py
+
+Этап 3.2: вся проверка делегирована в scripts/health_check.build_health_report.
+Этот файл — только wrapper для рассылки DM.
+"""
+from __future__ import annotations
+
 import os
 import sys
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import httpx
 
-# Добавляем корень проекта в путь, чтобы импортировать load_dotenv и конфиги
+import httpx
+from dotenv import load_dotenv
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-from dotenv import load_dotenv
+sys.path.insert(0, str(ROOT / "scripts"))
 load_dotenv(ROOT / ".env")
+
+from health_check import build_health_report  # noqa: E402
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID")
 
-STATE_FILE = ROOT / "state.json"
-HISTORY_FILE = ROOT / "history.json"
-MAX_SILENCE_HOURS = 12  # если бот молчит дольше этого — слать тревогу
 
-
-def send_telegram_message(text: str):
-    """Отправляет сообщение владельцу через Telegram Bot API."""
+def send_telegram_message(text: str) -> None:
     if not TELEGRAM_TOKEN or not OWNER_CHAT_ID:
         print("Нет токена/OWNER_CHAT_ID, не могу отправить уведомление.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": OWNER_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML"
-    }
+    payload = {"chat_id": OWNER_CHAT_ID, "text": text, "parse_mode": "HTML"}
     try:
         r = httpx.post(url, json=payload, timeout=10)
         r.raise_for_status()
@@ -43,42 +39,32 @@ def send_telegram_message(text: str):
         print(f"Ошибка отправки уведомления: {e}")
 
 
-def check_last_post_time() -> datetime | None:
-    """Возвращает время последнего поста из history.json."""
-    if not HISTORY_FILE.exists():
-        return None
-    try:
-        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-        if not data:
-            return None
-        last_entry = data[-1]
-        ts = last_entry.get("datetime")
-        if ts:
-            return datetime.fromisoformat(ts)
-    except Exception as e:
-        print(f"Ошибка чтения истории: {e}")
-    return None
+def main() -> int:
+    report = build_health_report()
+    if report["ok"]:
+        age = report["last_post_age_hours"]
+        print(f"OK. last post {age}h назад, scheduler={report['scheduler_hint']}")
+        return 0
 
-
-def main():
-    now = datetime.now(tz=timezone.utc)
-    last_post = check_last_post_time()
-    if last_post is None:
-        send_telegram_message("🚨 <b>Мониторинг</b>: нет записей в history.json. Бот, возможно, не запущен или не публиковал посты.")
-        return
-
-    silence = now - last_post
-    hours_silent = silence.total_seconds() / 3600
-    if hours_silent > MAX_SILENCE_HOURS:
-        text = (
-            f"⚠️ <b>Бот молчит уже {hours_silent:.1f} часов!</b>\n"
-            f"Последний пост был: {last_post.strftime('%Y-%m-%d %H:%M UTC')}\n"
-            "Проверьте работу планировщика или API."
+    reasons: list[str] = []
+    if report["scheduler_hint"] != "alive":
+        reasons.append(f"scheduler={report['scheduler_hint']}")
+    if report["post_stale"]:
+        age = report["last_post_age_hours"]
+        reasons.append(
+            f"последний пост {age}h назад" if age is not None else "постов не было"
         )
-        send_telegram_message(text)
-    else:
-        print(f"Бот активен. Последний пост {hours_silent:.1f} ч. назад — всё в порядке.")
+
+    text = (
+        "⚠️ <b>Watchdog: health-check failed</b>\n"
+        f"Reasons: {', '.join(reasons) or 'unknown'}\n"
+        f"Pending news drafts: {report['pending_news_drafts']}\n"
+        f"Active confirm trades: {report['active_confirm_trades']}"
+    )
+    send_telegram_message(text)
+    print(text)
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
