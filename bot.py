@@ -87,6 +87,7 @@ from core.content_mix_writer import (
     make_event as _cmw_make_event,
     migrate_state as _cmw_migrate_state,
 )
+from core.post_tags import merge_tags as _merge_post_tags
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -915,19 +916,11 @@ def build_post_html(
     disclaimer_text = DISCLAIMER if post_type == "fallback_education" else DISCLAIMER_SHORT
     parts.append("<i>" + esc(disclaimer_text) + "</i>")
 
-    tags = payload.get("hashtags") or []
-    tags = [t if str(t).startswith("#") else f"#{t}" for t in tags]
-    system_tags: list[str] = ["#честный_путь"]
-    # Хомяк появился — отметим рубрикой #не_будь_хомяком, иначе #ошибки_новичка
-    if hamster:
-        system_tags.append("#не_будь_хомяком")
-    else:
-        system_tags.append("#ошибки_новичка")
-    if post_type == "flash":
-        system_tags.append("#flash")
-    elif post_type == "fallback_education":
-        system_tags.append("#термин_без_боли")
-    all_tags = list(dict.fromkeys(tags + system_tags))  # dedupe, preserve order
+    all_tags = _merge_post_tags(
+        payload.get("hashtags") or [],
+        post_type=post_type,
+        has_hamster=bool(hamster),
+    )
     parts.append("")
     parts.append(" ".join(esc(t) for t in all_tags))
 
@@ -1001,18 +994,11 @@ def _build_post_html_raw(
     parts.append("")
     disclaimer_text = DISCLAIMER if post_type == "fallback_education" else DISCLAIMER_SHORT
     parts.append("<i>" + esc(disclaimer_text) + "</i>")
-    tags = payload.get("hashtags") or []
-    tags = [t if str(t).startswith("#") else f"#{t}" for t in tags]
-    system_tags: list[str] = ["#честный_путь"]
-    if hamster:
-        system_tags.append("#не_будь_хомяком")
-    else:
-        system_tags.append("#ошибки_новичка")
-    if post_type == "flash":
-        system_tags.append("#flash")
-    elif post_type == "fallback_education":
-        system_tags.append("#термин_без_боли")
-    all_tags = list(dict.fromkeys(tags + system_tags))
+    all_tags = _merge_post_tags(
+        payload.get("hashtags") or [],
+        post_type=post_type,
+        has_hamster=bool(hamster),
+    )
     parts += ["", " ".join(esc(t) for t in all_tags)]
     text = "\n".join(parts).strip()
     while "\n\n\n" in text:
