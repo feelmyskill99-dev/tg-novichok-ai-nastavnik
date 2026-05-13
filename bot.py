@@ -82,6 +82,11 @@ from core.content_mix import (
     category_for as _cm_category_for,
     compute_mix as _cm_compute_mix,
 )
+from core.content_mix_writer import (
+    append_event as _cmw_append_event,
+    make_event as _cmw_make_event,
+    migrate_state as _cmw_migrate_state,
+)
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -272,35 +277,8 @@ _category_for = _cm_category_for
 
 
 def _migrate_content_mix_state_if_needed(s: dict) -> bool:
-    """Мягкая миграция: если есть старая плоская структура state.posts_log
-    ([{type, ts}]) — переносим в state.content_mix_log с full schema.
-    Возвращает True если состояние было изменено."""
-    if "content_mix_log" in s and isinstance(s["content_mix_log"], list):
-        return False
-    legacy = s.get("posts_log")
-    if isinstance(legacy, list) and legacy:
-        migrated = []
-        for rec in legacy:
-            if not isinstance(rec, dict):
-                continue
-            old_type = rec.get("type") or ""
-            ts = rec.get("ts") or datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
-            migrated.append({
-                "timestamp": ts,
-                "post_type": old_type,
-                "category": _category_for(old_type),
-                "published_to": "channel",   # старая логика логировала только channel
-                "title": "",
-                "source": "legacy",
-            })
-        s["content_mix_log"] = migrated
-        s.pop("posts_log", None)
-        log.info("content_mix: мигрировано %d записей из posts_log → content_mix_log", len(migrated))
-        return True
-    if "content_mix_log" not in s:
-        s["content_mix_log"] = []
-        return True
-    return False
+    """Backwards-compat обёртка над core.content_mix_writer.migrate_state."""
+    return _cmw_migrate_state(s)
 
 
 def _log_post_event(
@@ -319,31 +297,10 @@ def _log_post_event(
         log.warning("content_mix: bad published_to=%r, skip", published_to)
         return
     s = load_state()
-    _migrate_content_mix_state_if_needed(s)
-    log_list = s.get("content_mix_log") or []
-    if not isinstance(log_list, list):
-        log_list = []
-    log_list.append({
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
-        "post_type": post_type or "",
-        "category": _category_for(post_type),
-        "published_to": published_to,
-        "title": (title or "")[:240],
-        "source": source or "",
-    })
-    # rolling-cleanup: держим окно 14 дней + cap (на случай долгих DRY-режимов)
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=14)
-    fresh: list[dict] = []
-    for ev in log_list:
-        try:
-            ts = datetime.fromisoformat(ev.get("timestamp") or "")
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= cutoff:
-                fresh.append(ev)
-        except Exception:
-            continue
-    s["content_mix_log"] = fresh[-CONTENT_MIX_LOG_CAP:]
+    event = _cmw_make_event(
+        post_type, published_to=published_to, title=title, source=source,
+    )
+    _cmw_append_event(s, event)
     save_state(s)
 
 

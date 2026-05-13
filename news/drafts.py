@@ -192,9 +192,11 @@ def create_draft_from(
         owner_feedback=[],
         image_path=image_path or "",
         guard_reasons=list(guard_reasons or []),
-        image_origin=image_origin or ("source_preview" if image_path and image_source_url else
-                                      "generated_ai" if image_path and image_prompt else
-                                      "manual_upload" if image_path else "none"),
+        image_origin=(image_origin if image_origin and image_origin != "none"
+                      else "source_preview" if image_path and image_source_url
+                      else "generated_ai" if image_path and image_prompt
+                      else "manual_upload" if image_path
+                      else "none"),
         image_source_url=image_source_url or "",
         image_credit=image_credit or (item.source or ""),
         image_prompt=image_prompt or "",
