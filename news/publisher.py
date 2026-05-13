@@ -910,6 +910,21 @@ class NewsPublisher:
 
         if not claude_payload.get("should_publish"):
             self.dedup.remember(item, "claude_rejected", short_summary=short_summary)
+            # Stage 14: info DM владельцу без кнопок
+            if self.cfg.news_send_to_owner and self.owner_chat_id:
+                skip_reason = str(claude_payload.get("skip_reason") or claude_payload.get("reason") or "").strip()
+                if not skip_reason:
+                    skip_reason = "(без причины от Claude)"
+                title_short = (item.title or "(no title)")[:80]
+                try:
+                    await self.send(
+                        self.owner_chat_id,
+                        f"🔕 <b>Скипнул новость</b>\n\n"
+                        f"<i>{_e(title_short)}</i>\n\nпричина: {_e(skip_reason)}",
+                        None,
+                    )
+                except Exception as e:
+                    log.warning("should_publish=false info DM failed: %s", e)
             return "claude_rejected"
 
         if item.impact_score < self.cfg.news_min_impact_score:
