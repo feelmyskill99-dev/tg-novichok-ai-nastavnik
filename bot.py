@@ -1232,6 +1232,25 @@ class Publisher:
             log.exception("Claude failed: %s", e)
             return
 
+        # Этап 2.6: pre-publish style guard. forbidden_words → блокируем
+        # публикацию, шлём DM владельцу. Markers — soft warning, не блокировка.
+        try:
+            from core.styleguard_block import check_payload_or_reject
+            ok_style, style_reason = check_payload_or_reject(payload, styleguard)
+            if not ok_style:
+                log.warning("style block: %s", style_reason)
+                try:
+                    await self.bot.send_message(
+                        OWNER_CHAT_ID,
+                        f"⛔ Style block: {style_reason}\n\n"
+                        f"Пост не отправлен в канал.",
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception as e:
+            log.warning("styleguard check failed (fail-open): %s", e)
+
         # --- image (по флагу + не чаще 1/N, flash может чаще) ---
         photo_path: Path | None = None
         frequency_ok = post_num - int(state.get("last_image_at", 0)) >= IMAGE_EVERY_N
