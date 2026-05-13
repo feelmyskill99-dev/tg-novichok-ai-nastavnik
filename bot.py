@@ -100,6 +100,14 @@ from core.trade_state import (
     set_last_trade_tick_at as _ts_set_tick_at,
     today_utc_iso as _ts_today_utc_iso,
 )
+from core.draft_state import (
+    get_author_notes_week_count as _ds_get_author_week_count,
+    get_awaiting_edit as _ds_get_awaiting_edit,
+    get_news_post_counter as _ds_get_news_counter,
+    increment_author_notes_week_count as _ds_inc_author_week,
+    increment_news_post_counter as _ds_inc_news_counter,
+    set_awaiting_edit as _ds_set_awaiting_edit,
+)
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -2473,16 +2481,12 @@ def _register_confirm_callbacks(dp: Dispatcher) -> None:
 # ---------- Stage 10: author-note review callbacks ----------
 
 def _state_get_awaiting_author_edit() -> str:
-    s = load_state()
-    return str(s.get("awaiting_author_edit_for") or "")
+    return _ds_get_awaiting_edit(load_state(), "author")
 
 
 def _state_set_awaiting_author_edit(draft_id: str | None) -> None:
     s = load_state()
-    if draft_id:
-        s["awaiting_author_edit_for"] = draft_id
-    else:
-        s.pop("awaiting_author_edit_for", None)
+    _ds_set_awaiting_edit(s, "author", draft_id)
     save_state(s)
 
 
@@ -2899,35 +2903,26 @@ def _register_weekly_diary_callbacks(dp: Dispatcher) -> None:
 # ---------- Stage 6b: news review callbacks ----------
 
 def _state_get_awaiting_news_edit() -> str:
-    s = load_state()
-    return str(s.get("awaiting_news_edit_for") or "")
+    return _ds_get_awaiting_edit(load_state(), "news")
 
 
 def _state_set_awaiting_news_edit(draft_id: str | None) -> None:
     s = load_state()
-    if draft_id:
-        s["awaiting_news_edit_for"] = draft_id
-    else:
-        s.pop("awaiting_news_edit_for", None)
+    _ds_set_awaiting_edit(s, "news", draft_id)
     save_state(s)
 
 
 def _state_get_news_post_counter() -> int:
     """Stage 14 — счётчик опубликованных в канал news-постов (для mistake_theme inject)."""
-    s = load_state()
-    try:
-        return int(s.get("news_post_counter") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return _ds_get_news_counter(load_state())
 
 
 def _state_inc_news_post_counter() -> int:
     """Stage 14 — atomic increment, возвращает новое значение."""
     s = load_state()
-    cur = int(s.get("news_post_counter") or 0)
-    s["news_post_counter"] = cur + 1
+    new_val = _ds_inc_news_counter(s)
     save_state(s)
-    return cur + 1
+    return new_val
 
 
 # Stage 12e — image-intent triggers, разделённые на два класса:
@@ -4720,27 +4715,12 @@ async def run_news_debug_cmd() -> None:
 
 def _state_get_author_notes_week_count() -> int:
     """Сколько author_notes опубликовано в текущей ISO-неделе (по UTC)."""
-    s = load_state()
-    today = datetime.now(tz=timezone.utc).isocalendar()
-    key = f"{today.year}-{today.week:02d}"
-    if s.get("author_notes_week_key") != key:
-        return 0
-    try:
-        return int(s.get("author_notes_week_count") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return _ds_get_author_week_count(load_state())
 
 
 def _state_increment_author_notes_week_count() -> None:
     s = load_state()
-    today = datetime.now(tz=timezone.utc).isocalendar()
-    key = f"{today.year}-{today.week:02d}"
-    if s.get("author_notes_week_key") != key:
-        s["author_notes_week_count"] = 1
-        s["author_notes_week_key"] = key
-    else:
-        s["author_notes_week_count"] = int(s.get("author_notes_week_count") or 0) + 1
-    s["last_author_note_at"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+    _ds_inc_author_week(s)
     save_state(s)
 
 
