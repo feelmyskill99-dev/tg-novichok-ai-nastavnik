@@ -854,6 +854,8 @@ class NewsPublisher:
         draft_store: Optional[DraftStore] = None,
         preview_send_fn: Optional[PreviewSendFn] = None,
         news_post_counter: int = 0,
+        counter_get: Optional[Callable[[], int]] = None,
+        counter_inc: Optional[Callable[[], int]] = None,
     ):
         self.cfg = config
         self.dedup = dedup
@@ -862,7 +864,29 @@ class NewsPublisher:
         self.send = send_fn
         self.draft_store = draft_store
         self.preview_send = preview_send_fn
-        self.news_post_counter = news_post_counter
+        # Stage 14: counter может быть либо персистентным (callable из state.json)
+        # либо in-process (legacy). Persisting wins, если оба заданы.
+        self._counter_get = counter_get
+        self._counter_inc = counter_inc
+        self._counter_value = news_post_counter
+
+    def _get_counter(self) -> int:
+        if self._counter_get:
+            try:
+                return int(self._counter_get())
+            except Exception:
+                return self._counter_value
+        return self._counter_value
+
+    def _inc_counter(self) -> int:
+        if self._counter_inc:
+            try:
+                return int(self._counter_inc())
+            except Exception:
+                self._counter_value += 1
+                return self._counter_value
+        self._counter_value += 1
+        return self._counter_value
 
     async def publish(
         self,
@@ -962,7 +986,7 @@ class NewsPublisher:
         if channel_allowed:
             await self.send(self.channel_id, text, image_path)
             self.dedup.remember(item, "published_channel", short_summary=short_summary)
-            self.news_post_counter += 1
+            self._inc_counter()
             return "published_channel"
 
         # Stage 12g — лимит ревью в день.

@@ -3084,6 +3084,24 @@ def _state_set_awaiting_news_edit(draft_id: str | None) -> None:
     save_state(s)
 
 
+def _state_get_news_post_counter() -> int:
+    """Stage 14 — счётчик опубликованных в канал news-постов (для mistake_theme inject)."""
+    s = load_state()
+    try:
+        return int(s.get("news_post_counter") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _state_inc_news_post_counter() -> int:
+    """Stage 14 — atomic increment, возвращает новое значение."""
+    s = load_state()
+    cur = int(s.get("news_post_counter") or 0)
+    s["news_post_counter"] = cur + 1
+    save_state(s)
+    return cur + 1
+
+
 # Stage 12e — image-intent triggers, разделённые на два класса:
 # AI-intent → вызвать OpenAI (через news_generate_ai_image),
 # source-intent → вытащить og:image из источника (через news_refresh_source_image).
@@ -4383,6 +4401,8 @@ async def run_news_now_cmd() -> None:
             drafts_path=NEWS_DRAFTS_FILE,
             preview_send_fn=lambda text, kb, image_path=None: _news_preview_send(bot, text, kb, image_path),
             image_provider=_news_image_provider,
+            counter_get=_state_get_news_post_counter,
+            counter_inc=_state_inc_news_post_counter,
         )
         log.info("news_now result: %s", result)
         # Stage 10+: учёт в контент-миксе
