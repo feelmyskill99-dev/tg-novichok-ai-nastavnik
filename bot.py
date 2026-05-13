@@ -3498,7 +3498,19 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_publish:"))
     async def on_news_publish(cb: CallbackQuery):
+        log.info(
+            "CB news_publish: from=%s data=%s msg_id=%s",
+            cb.from_user.id if cb.from_user else "?",
+            cb.data,
+            cb.message.message_id if cb.message else "?",
+        )
+        await cb.answer()  # Stage 14: ack СРАЗУ, до тяжёлой логики
         if not await _is_owner_cb(cb):
+            log.warning(
+                "CB news_publish: not owner (from=%s expected=%s)",
+                cb.from_user.id if cb.from_user else "?",
+                OWNER_CHAT_ID,
+            )
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3506,15 +3518,20 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         if not draft:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        # Stage 14 idempotency: расширенный TERMINAL включая publishing
+        TERMINAL = {"published", "rejected", "publishing"}
+        if draft.status in TERMINAL:
+            await cb.answer(f"Уже обработано ({draft.status})", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
             return
 
-        await cb.answer("Публикую…", show_alert=False)
+        # Stage 14: переводим в publishing СРАЗУ, чтобы второй клик увидел terminal
+        draft.status = "publishing"
+        store.update(draft)
+
         reasons = _publish_guard_reasons()
         if reasons:
             draft.status = "approved"
@@ -3556,6 +3573,9 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
             payload_reasons = [f"publish-guard crashed: {e}"]
 
         if payload_reasons:
+            # Откат статуса — владелец будет править/регенерировать
+            draft.status = "pending_review"
+            store.update(draft)
             try:
                 await _send_dm_html(
                     cb.bot,
@@ -3579,6 +3599,9 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
             )
         except Exception as e:
             log.exception("news_publish: send to channel failed: %s", e)
+            # Stage 14: откат idempotency — позволяем владельцу повторить
+            draft.status = "pending_review"
+            store.update(draft)
             try:
                 await _send_dm_html(cb.bot, f"❌ Ошибка публикации в канал: {html.escape(str(e), quote=False)}")
             except Exception:
@@ -3587,6 +3610,12 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
         draft.status = "published"
         store.update(draft)
+
+        # Stage 14: инкрементируем news_post_counter в state.json
+        try:
+            _state_inc_news_post_counter()
+        except Exception as e:
+            log.warning("news_post_counter inc failed: %s", e)
 
         # отметим в news_history.json (для дедупа и счётчика postedToday)
         try:
@@ -3636,7 +3665,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_reject:"))
     async def on_news_reject(cb: CallbackQuery):
+        log.info(
+            "CB news_reject: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_reject: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3644,8 +3679,9 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         if not draft:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        TERMINAL = {"published", "rejected", "publishing"}
+        if draft.status in TERMINAL:
+            await cb.answer(f"Уже обработано ({draft.status})", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -3686,7 +3722,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_regenerate:"))
     async def on_news_regenerate(cb: CallbackQuery):
+        log.info(
+            "CB news_regenerate: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_regenerate: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3694,8 +3736,8 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         if not draft:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        if draft.status in ("published", "rejected", "publishing"):
+            await cb.answer(f"Уже обработано ({draft.status})", show_alert=True)
             return
         if not CLAUDE_API_KEY:
             await cb.answer("CLAUDE_API_KEY не задан", show_alert=True)
@@ -3778,7 +3820,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
     @dp.callback_query(F.data.startswith("news_generate_ai_image:"))
     async def on_news_generate_ai_image(cb: CallbackQuery):
         """Stage 12e — единственная кнопка, вызывающая OpenAI Image API."""
+        log.info(
+            "CB news_generate_ai_image: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_generate_ai_image: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3843,7 +3891,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
     @dp.callback_query(F.data.startswith("news_refresh_source_image:"))
     async def on_news_refresh_source_image(cb: CallbackQuery):
         """Stage 12e — заново вытащить og:image / twitter:image из источника."""
+        log.info(
+            "CB news_refresh_source_image: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_refresh_source_image: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3901,7 +3955,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_edit:"))
     async def on_news_edit(cb: CallbackQuery):
+        log.info(
+            "CB news_edit: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_edit: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
