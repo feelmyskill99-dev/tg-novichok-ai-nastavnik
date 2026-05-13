@@ -7,7 +7,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from news.publisher import merge_hashtags
+from news.publisher import merge_hashtags, normalize_payload_v2, SECTOR_EMOJI_FALLBACK
+from news.models import NewsItem
+
+
+def _make_item(sector="ai_crypto", title="test", url="https://example.com/x"):
+    return NewsItem(
+        title=title, url=url, source="src", published_at="",
+        summary="", assets=[], category="other", sector=sector,
+        impact_score=80.0,
+    )
 
 
 def test_merge_hashtags_basic():
@@ -76,3 +85,77 @@ def test_merge_hashtags_btc_in_first_two_added():
     )
     assert "#BTC" in result
     assert "#DOGE" not in result
+
+
+# --- normalize_payload_v2 -------------------------------------------------
+
+
+def test_normalize_fills_title_emoji_from_sector():
+    """Если Claude не дал title_emoji — берём из SECTOR_EMOJI_FALLBACK."""
+    payload = {
+        "should_publish": True,
+        "specific_title": "Some title",
+        "lead": "x" * 100,
+        "facts": ["a" * 50, "b" * 50, "c" * 50],
+        "newbie_voice": "y" * 50,
+        "tone": "calm",
+    }
+    item = _make_item(sector="ai_crypto")
+    normalized = normalize_payload_v2(payload, item)
+    assert normalized["title_emoji"] == SECTOR_EMOJI_FALLBACK["ai_crypto"]
+
+
+def test_normalize_keeps_explicit_emoji():
+    """Если title_emoji уже задан Claude — не перезаписываем."""
+    payload = {
+        "should_publish": True,
+        "specific_title": "Some title",
+        "title_emoji": "🎯",
+        "lead": "x" * 100,
+        "facts": ["a" * 50, "b" * 50, "c" * 50],
+        "newbie_voice": "y" * 50,
+        "tone": "harsh",
+    }
+    item = _make_item(sector="security_hacks_scams")
+    normalized = normalize_payload_v2(payload, item)
+    assert normalized["title_emoji"] == "🎯"
+
+
+def test_normalize_fixes_invalid_tone():
+    """Если tone не из enum — заменяем на pick_tone."""
+    payload = {
+        "should_publish": True,
+        "specific_title": "Some title",
+        "lead": "x" * 100,
+        "facts": ["a" * 50, "b" * 50, "c" * 50],
+        "newbie_voice": "y" * 50,
+        "tone": "weird_unknown_tone",
+    }
+    item = _make_item(sector="security_hacks_scams")
+    normalized = normalize_payload_v2(payload, item)
+    assert normalized["tone"] in ("harsh", "confused", "ironic", "calm")
+
+
+def test_normalize_does_not_mutate_input():
+    """normalize возвращает новый dict, не трогает входной."""
+    payload = {"should_publish": True, "tone": "invalid"}
+    item = _make_item()
+    original = dict(payload)
+    normalize_payload_v2(payload, item)
+    assert payload == original
+
+
+def test_normalize_applies_merge_hashtags():
+    """normalize прогоняет хэштеги через merge_hashtags."""
+    payload = {
+        "should_publish": True,
+        "tone": "harsh",
+        "hashtags": ["#DeFi"],
+    }
+    item = _make_item(sector="security_hacks_scams")
+    item.assets = ["BTC"]
+    normalized = normalize_payload_v2(payload, item)
+    # rubric + #BTC + #DeFi
+    assert normalized["hashtags"][0] == "#безопасность_депозита"
+    assert "#BTC" in normalized["hashtags"]
+    assert "#DeFi" in normalized["hashtags"]

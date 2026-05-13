@@ -232,6 +232,40 @@ def pick_tone(item: "NewsItem", revision_count: int = 0) -> str:
     return candidates[idx]
 
 
+def normalize_payload_v2(payload: dict, item: "NewsItem", revision_count: int = 0) -> dict:
+    """Stage 14 — единая точка fallback-логики для v2 payload.
+
+    Возвращает новый dict (вход не модифицируется):
+    - title_emoji: если пусто → SECTOR_EMOJI_FALLBACK[sector]
+    - tone: если не из enum → pick_tone(item, revision_count)
+    - facts: cleanup whitespace и фильтр пустых строк
+    - hashtags: применяем merge_hashtags (rubric + assets + claude)
+    """
+    p = dict(payload)
+    sector = (item.sector or "other").strip()
+
+    emoji = str(p.get("title_emoji") or "").strip()
+    if not emoji:
+        p["title_emoji"] = SECTOR_EMOJI_FALLBACK.get(sector, "🗒️")
+
+    tone = str(p.get("tone") or "").strip().lower()
+    if tone not in ("harsh", "confused", "ironic", "calm"):
+        p["tone"] = pick_tone(item, revision_count)
+    else:
+        p["tone"] = tone
+
+    facts_raw = _safe_list(p.get("facts"))
+    p["facts"] = [str(f).strip() for f in facts_raw if str(f).strip()]
+
+    p["hashtags"] = merge_hashtags(
+        claude_tags=p.get("hashtags") or [],
+        sector=sector,
+        assets=item.assets or [],
+    )
+
+    return p
+
+
 def inject_mistake_theme(payload: dict, *, counter: int, revision_count: int = 0,
                          themes_path: str = "mistake_themes.json") -> dict:
     """Stage 14 — каждый 5-й пост получает hint с темой ошибки новичка.
@@ -838,15 +872,17 @@ class NewsPublisher:
 
         # Build post HTML — v2 compact format, v1 может быть compact или full
         if use_v2:
-            text = build_html_v2(claude_payload, item)
             guard_reasons = validate_payload_v2(claude_payload, item)
+            normalized_payload = normalize_payload_v2(claude_payload, item)
+            text = build_html_v2(normalized_payload, item)
         else:
             text = build_html_legacy(claude_payload, item, compact=bool(image_path))
             guard_reasons = validate_payload_for_publish(claude_payload, item)
+            normalized_payload = claude_payload
 
         # Stage 14 — truncate cascade для v2
         if use_v2:
-            truncated = _truncate_post_to_caption_limit(text, claude_payload, item)
+            truncated = _truncate_post_to_caption_limit(text, normalized_payload, item)
             if truncated is None:
                 # Слишком плотная новость — алерт владельцу, в канал не публикуем
                 log.warning(
