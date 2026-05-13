@@ -28,3 +28,8 @@ mistake_tracker_state.json
 
 # Локальные experiment-сниппеты
 admin.html
+
+# SQLite (этап 3.4) — снимок для миграции, не для git
+data.sqlite
+*.sqlite-wal
+*.sqlite-shm
