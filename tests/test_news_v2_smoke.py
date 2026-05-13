@@ -145,6 +145,30 @@ def test_normalize_does_not_mutate_input():
     assert payload == original
 
 
+def test_final_caption_guard_passes_valid():
+    from news.publisher import final_caption_guard
+    html = "<b>Title</b>\n\nLead text\n\n➤ fact"
+    ok, reason = final_caption_guard(html)
+    assert ok is True
+    assert reason == ""
+
+
+def test_final_caption_guard_rejects_over_limit():
+    from news.publisher import final_caption_guard
+    html = "x" * 1100
+    ok, reason = final_caption_guard(html)
+    assert ok is False
+    assert "1024" in reason
+
+
+def test_final_caption_guard_rejects_broken_html_tag():
+    from news.publisher import final_caption_guard
+    html = "<b>Title without closing"
+    ok, reason = final_caption_guard(html)
+    assert ok is False
+    assert "html" in reason.lower() or "tag" in reason.lower()
+
+
 def test_normalize_applies_merge_hashtags():
     """normalize прогоняет хэштеги через merge_hashtags."""
     payload = {

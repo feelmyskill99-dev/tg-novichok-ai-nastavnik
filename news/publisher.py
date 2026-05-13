@@ -631,6 +631,32 @@ def _truncate_post_to_caption_limit(post_html: str, payload: dict, item: "NewsIt
 PHOTO_CAPTION_HARD_LIMIT = 1024
 
 
+def final_caption_guard(html: str) -> tuple[bool, str]:
+    """Stage 14 — финальная проверка caption ПЕРЕД send_photo.
+
+    Проверяет ТОЛЬКО caption safety:
+    - len(html) ≤ PHOTO_CAPTION_HARD_LIMIT
+    - простая балансировка тегов <b>, <i>, <a>
+
+    Returns (ok, reason). При ok=True reason пустой.
+    """
+    import re as _re
+    if not isinstance(html, str):
+        return False, "html не строка"
+    if len(html) > PHOTO_CAPTION_HARD_LIMIT:
+        return False, f"caption {len(html)} > {PHOTO_CAPTION_HARD_LIMIT} chars"
+    for tag in ("b", "i"):
+        opens = len(_re.findall(rf"<{tag}>", html))
+        closes = len(_re.findall(rf"</{tag}>", html))
+        if opens != closes:
+            return False, f"broken html: <{tag}> opens={opens} closes={closes}"
+    a_opens = len(_re.findall(r"<a\s+href=", html))
+    a_closes = len(_re.findall(r"</a>", html))
+    if a_opens != a_closes:
+        return False, f"broken html: <a> opens={a_opens} closes={a_closes}"
+    return True, ""
+
+
 # --- HTML render (legacy v1) -------------------------------------------------
 
 def _truncate_to_sentence(text: str, max_chars: int) -> str:
@@ -904,6 +930,21 @@ class NewsPublisher:
                 self.dedup.remember(item, "skipped", short_summary="truncation failed")
                 return "skipped"
             text = truncated
+            ok, reason = final_caption_guard(text)
+            if not ok:
+                log.error("final_caption_guard failed for %r: %s", item.title[:80], reason)
+                if self.cfg.news_send_to_owner and self.owner_chat_id:
+                    try:
+                        await self.send(
+                            self.owner_chat_id,
+                            f"⚠️ <b>Caption guard заблокировал публикацию</b>\n\n"
+                            f"<i>{_e(item.title[:200])}</i>\n\nпричина: {_e(reason)}",
+                            None,
+                        )
+                    except Exception:
+                        pass
+                self.dedup.remember(item, "skipped", short_summary=f"caption guard: {reason}")
+                return "skipped"
 
         channel_allowed = (
             self.cfg.enable_news

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import admin_panel
 import os
 import sys
 import json
@@ -64,8 +65,9 @@ import uvicorn
 
 from core.safety import Sentinel
 from core.styleguard import StyleGuard
-
+from core.mistake_tracker import MistakeTracker
 styleguard: Optional[StyleGuard] = None
+mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -82,6 +84,8 @@ NEWS_HISTORY_FILE = ROOT / "news_history.json"
 NEWS_DRAFTS_FILE = ROOT / "news_drafts.json"
 # Stage 10
 AUTHOR_NOTES_FILE = ROOT / "author_notes_drafts.json"
+# Stage 13 — weekly diary
+WEEKLY_DIARY_FILE = ROOT / "weekly_diary_drafts.json"
 # Stage 8a — confirm/live storage
 CONFIRM_TRADES_FILE = ROOT / "confirm_trades.json"
 LIVE_TRADES_FILE = ROOT / "live_trades.json"
@@ -906,17 +910,20 @@ CLAUDE_SYSTEM = f"""
 - fallback_education — рыночные данные недоступны; пишем по теме market_snapshot.fallback_topic
                        БЕЗ конкретных цифр и цен
 
-ДЛИНА (важно — Telegram читают с телефона):
-- обычный/новостной пост: 900–1300 символов
-- обучающий (fallback_education): 1200–1800 символов
-- абзац максимум 1–3 строки
+ДЛИНА (важно — Telegram caption-лимит фото 1024 символа, всё должно влезть в одно сообщение photo+caption):
+- обычный/новостной/flash пост: 700–880 символов СУММАРНО по полям
+  human_part + hamster_part + mentor_part + beginner_mistake + lesson + question
+  (партнёрка и хэштеги добавляются автоматически уже после).
+- обучающий (fallback_education): 700–900 символов суммарно — те же поля.
+- абзац максимум 1–3 строки. Без длинных стен текста.
+- mentor_part: 2–3 КОРОТКИХ абзаца, не больше. Каждая мысль ≤2 фраз.
 
 СТРУКТУРА (мини-сцена):
 1) human_part — живой хук + что увидел/почувствовал новичок (2–4 короткие фразы)
 2) hamster_part — короткая эмоциональная реакция «внутреннего хомяка» в кавычках
                   (используй ~50% постов; null если не уместно — например, в обучающем без эмоций)
 3) mentor_part — AI-наставник спокойно, строго и слегка саркастично возвращает на землю
-                 (3–5 коротких абзацев / маркеры — по смыслу)
+                 (2–3 коротких абзаца — по смыслу; не больше)
 4) beginner_mistake — ОДНА конкретная ошибка новичка, которую этот пост предотвращает (1 фраза)
 5) lesson — короткий вывод 1–2 предложения, без призыва к действию
 
@@ -1099,6 +1106,88 @@ def build_post_html(
     # финальная чистка лишних двойных пустых строк
     while "\n\n\n" in text:
         text = text.replace("\n\n\n", "\n\n")
+    # Stage 13: caption-guard. Если Claude всё равно превысил бюджет и итог
+    # длиннее лимита caption фото (1024 chars) — обрезаем mentor_part по
+    # последнему абзацу до влезания. Beginner_mistake/lesson/partner/tags
+    # сохраняем как ключевую структуру.
+    if len(text) > TELEGRAM_PHOTO_CAPTION_LIMIT and mentor:
+        text = _shrink_to_caption_limit(payload, post_type, include_partner, post_num)
+    return text
+
+
+def _shrink_to_caption_limit(
+    payload: dict, post_type: str, include_partner: bool, post_num: int,
+) -> str:
+    """Перестраивает пост, по абзацам отрезая mentor_part с конца, пока итог
+    не влезет в TELEGRAM_PHOTO_CAPTION_LIMIT. Возвращает финальный HTML.
+    Если даже с пустым mentor не влазит — режет hamster_part.
+    """
+    mentor_full = (payload.get("mentor_part") or "").strip()
+    paragraphs = [p.strip() for p in mentor_full.split("\n\n") if p.strip()]
+    while paragraphs:
+        paragraphs.pop()  # убираем последний абзац mentor_part
+        trial_payload = dict(payload, mentor_part="\n\n".join(paragraphs))
+        trial = _build_post_html_raw(trial_payload, post_type, include_partner, post_num)
+        if len(trial) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+            log.warning("post shrunk: mentor_part trimmed to %d paragraphs (final=%d chars)",
+                        len(paragraphs), len(trial))
+            return trial
+    # mentor пустой — пробуем убрать hamster
+    trial_payload = dict(payload, mentor_part="", hamster_part=None)
+    trial = _build_post_html_raw(trial_payload, post_type, include_partner, post_num)
+    if len(trial) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+        log.warning("post shrunk: mentor+hamster removed (final=%d chars)", len(trial))
+        return trial
+    # совсем плохо — отдаём как есть, длинный split-flow в send_post_with_optional_image
+    log.error("post still > %d chars even after shrink, will split", TELEGRAM_PHOTO_CAPTION_LIMIT)
+    return _build_post_html_raw(payload, post_type, include_partner, post_num)
+
+
+def _build_post_html_raw(
+    payload: dict, post_type: str, include_partner: bool, post_num: int,
+) -> str:
+    """Внутренняя версия build_post_html без caption-guard (избегаем рекурсии)."""
+    parts: list[str] = []
+    human = esc(payload.get("human_part", "")).strip()
+    hamster = esc(payload.get("hamster_part") or "").strip()
+    mentor = esc(payload.get("mentor_part", "")).strip()
+    mistake = esc(payload.get("beginner_mistake") or "").strip()
+    lesson = esc(payload.get("lesson") or payload.get("conclusion") or "").strip()
+    if human:
+        parts.append(human)
+    if hamster:
+        parts += ["", "🐹 <b>Внутренний хомяк</b>", hamster]
+    if mentor:
+        parts += ["", "🤖 <b>AI-наставник</b>", mentor]
+    if mistake:
+        parts += ["", "⚠️ <b>Ошибка новичка</b>", mistake]
+    if lesson:
+        parts += ["", "📌 <b>Вывод</b>", lesson]
+    q = payload.get("question")
+    if q:
+        parts += ["", "💬 " + esc(q)]
+    if include_partner and PARTNER_URL:
+        hook = PARTNER_HOOKS[post_num % len(PARTNER_HOOKS)]
+        parts += ["", hook.format(url=esc(PARTNER_URL))]
+    parts.append("")
+    disclaimer_text = DISCLAIMER if post_type == "fallback_education" else DISCLAIMER_SHORT
+    parts.append("<i>" + esc(disclaimer_text) + "</i>")
+    tags = payload.get("hashtags") or []
+    tags = [t if str(t).startswith("#") else f"#{t}" for t in tags]
+    system_tags: list[str] = ["#честный_путь"]
+    if hamster:
+        system_tags.append("#не_будь_хомяком")
+    else:
+        system_tags.append("#ошибки_новичка")
+    if post_type == "flash":
+        system_tags.append("#flash")
+    elif post_type == "fallback_education":
+        system_tags.append("#термин_без_боли")
+    all_tags = list(dict.fromkeys(tags + system_tags))
+    parts += ["", " ".join(esc(t) for t in all_tags)]
+    text = "\n".join(parts).strip()
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
     return text
 
 
@@ -1165,6 +1254,7 @@ class Publisher:
         source: str = "scheduled",
         user_action: str | None = None,
         image_context: str | None = None,
+        force_education: bool = False,
     ) -> None:
         state = load_state()
         post_num = int(state.get("post_count", 0)) + 1
@@ -1182,7 +1272,12 @@ class Publisher:
         post_type = "market"
         mode = "normal"
 
-        if not ticker or df is None or len(df) < 20:
+        if force_education:
+            # Stage 13: вечерний education-слот. Не зависит от рынка, мы просто
+            # переходим в обучающий режим с темой из MistakeTracker.
+            post_type = "fallback_education"
+            mode = "fallback_education"
+        elif not ticker or df is None or len(df) < 20:
             post_type = "fallback_education"
             mode = "fallback_education"
         elif ticker.get("change_24h") is not None and abs(ticker["change_24h"]) >= FLASH_THRESHOLD:
@@ -1193,7 +1288,14 @@ class Publisher:
         chart_path: Path | None = None
 
         if mode == "fallback_education":
-            market_snapshot = {"fallback_topic": random.choice(FALLBACK_TOPICS)}
+            # Используем MistakeTracker для равномерного покрытия тем
+            topic = mistake_tracker.get_next_topic()    # ← вызов метода, а не mistake_tracker()
+            market_snapshot = {"fallback_topic": topic}
+            # Запоминаем использование темы
+            for tid, info in mistake_tracker.themes.items():
+                if info["title"] == topic:
+                    mistake_tracker.record_usage(tid)
+                    break
         else:
             last = df.iloc[-1]
             def _f(col):
@@ -1349,15 +1451,29 @@ async def webhook(req: Request):
         image_context=data.get("image"),
     )
     return {"ok": True, "dry_run": DRY_RUN}
-# =============================================================================
-# MAIN
-# =============================================================================
 async def _safe_publish(publisher: Publisher, sentinel: Sentinel, source: str) -> None:
-    
-    """Обёртка для плановых публикаций с защитой Sentinel."""
-    await sentinel.safe_execute(publisher.publish(source=source), context=source)
+    """Обёртка для плановых публикаций с защитой Sentinel.
+
+    source `scheduled_evening_education` форсирует education-режим (Stage 13).
+    """
+    force_education = source == "scheduled_evening_education"
+    await sentinel.safe_execute(
+        publisher.publish(source=source, force_education=force_education),
+        context=source,
+    )
+
+async def _safe_mistake_report_job(bot: Bot, tracker: MistakeTracker):
+    try:
+        report = tracker.weekly_report()
+        if OWNER_CHAT_ID:
+            await bot.send_message(int(OWNER_CHAT_ID), report, parse_mode=ParseMode.HTML)
+        log.info("Mistake tracker weekly report sent.")
+    except Exception as e:
+        log.exception("Mistake report failed: %s", e)
 
 async def run_scheduler_forever() -> None:
+    global styleguard, mistake_tracker
+
     publisher = Publisher()
     _publisher_holder["p"] = publisher
 
@@ -1366,20 +1482,34 @@ async def run_scheduler_forever() -> None:
         bot=publisher.bot,
         channel_id=publisher._target_chat(),
         owner_chat_id=int(OWNER_CHAT_ID),
-        fallback_file=str(ROOT / "fallback_lessons.json")   # ← абсолютный путь
+        fallback_file=str(ROOT / "fallback_lessons.json")
     )
-    global styleguard
-    styleguard = StyleGuard(
-        forbidden_words_file=str(ROOT / "forbidden_words.json")
+    styleguard = StyleGuard()
+    mistake_tracker = MistakeTracker(
+        themes_file=str(ROOT / "mistake_themes.json"),
+        state_file=str(ROOT / "mistake_tracker_state.json")
     )
 
+    # === Передаём трекер в админ-панель ===
+    import admin_panel
+    admin_panel.mistake_tracker = mistake_tracker
+
     sched = AsyncIOScheduler(timezone=SCHEDULER_TZ)
+    # Stage 13: 10:00 ежедневно — market_chart; вечером 19:00 пн-сб —
+    # education (выравнивание content-mix к плану 40/20/15/15/10);
+    # вс 19:00 — weekly_diary (отдельным job ниже).
     sched.add_job(_safe_publish, "cron",
                   hour=POST_MORNING_HOUR, minute=0,
                   args=[publisher, sentinel, "scheduled_morning"])
     sched.add_job(_safe_publish, "cron",
+                  day_of_week="mon-sat",
                   hour=POST_EVENING_HOUR, minute=0,
-                  args=[publisher, sentinel, "scheduled_evening"])
+                  args=[publisher, sentinel, "scheduled_evening_education"])
+    sched.add_job(
+        _safe_mistake_report_job, "cron",
+        day_of_week="sun", hour=12, minute=0,
+        args=[publisher.bot, mistake_tracker]
+    )
 
     # news scan job — включается только если ENABLE_NEWS=true в .env
     try:
@@ -1418,6 +1548,22 @@ async def run_scheduler_forever() -> None:
             log.info("ENABLE_AUTHOR_NOTES=false — author_note job не активирован")
     except Exception as e:
         log.warning("не удалось инициализировать author_note job: %s", e)
+
+    # Stage 13: weekly_diary — воскресенье 19:00 МСК, превью владельцу
+    try:
+        from weekly_diary import WeeklyDiaryConfig as _WdCfg
+        _wd_cfg = _WdCfg.from_env()
+        if _wd_cfg.enable_weekly_diary:
+            sched.add_job(
+                _safe_weekly_diary_job, "cron",
+                day_of_week="sun", hour=19, minute=0, id="weekly_diary",
+            )
+            log.info("weekly_diary job: вс 19:00 %s | dry_run=%s",
+                     SCHEDULER_TZ, _wd_cfg.weekly_diary_dry_run)
+        else:
+            log.info("ENABLE_WEEKLY_DIARY=false — weekly_diary job не активирован")
+    except Exception as e:
+        log.warning("не удалось инициализировать weekly_diary job: %s", e)
 
     # auto-trade scan / tick jobs (Stage 7) — только если AUTO_TRADE_ENABLED=true
     try:
@@ -1548,6 +1694,7 @@ async def run_scheduler_forever() -> None:
     _register_confirm_callbacks(dp)
     _register_news_callbacks(dp)
     _register_author_note_callbacks(dp)
+    _register_weekly_diary_callbacks(dp)
     _register_trade_visual_handlers(dp)
     dp_bot = Bot(token=TELEGRAM_TOKEN, session=_ThreadedResolverSession())
     polling_task: asyncio.Task | None = None
@@ -2788,6 +2935,139 @@ def _register_author_note_callbacks(dp: Dispatcher) -> None:
             pass
 
 
+# ---------- Stage 13: weekly_diary review callbacks ----------
+
+def _register_weekly_diary_callbacks(dp: Dispatcher) -> None:
+    """Stage 13: ✅ / ❌ для weekly_diary. Без regenerate/edit — отклонил и
+    перезапусти `python bot.py --weekly-now`."""
+    from weekly_diary import WeeklyDiaryStore
+
+    async def _is_owner_cb(cb: CallbackQuery) -> bool:
+        if not OWNER_CHAT_ID:
+            await cb.answer("Owner chat not configured", show_alert=True)
+            return False
+        if str(cb.from_user.id) != str(OWNER_CHAT_ID).lstrip("@"):
+            log.warning("weekly callback from non-owner user_id=%s; ignored", cb.from_user.id)
+            await cb.answer("Not allowed", show_alert=True)
+            return False
+        return True
+
+    def _store() -> "WeeklyDiaryStore":
+        return WeeklyDiaryStore(WEEKLY_DIARY_FILE)
+
+    @dp.callback_query(F.data.startswith("weekly_publish:"))
+    async def on_weekly_publish(cb: CallbackQuery):
+        if not await _is_owner_cb(cb):
+            return
+        draft_id = cb.data.split(":", 1)[1]
+        store = _store()
+        draft = store.get(draft_id)
+        if not draft:
+            await cb.answer("Черновик не найден", show_alert=True)
+            return
+        if draft.status in ("published", "rejected"):
+            await cb.answer(f"Уже {draft.status}", show_alert=True)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        from weekly_diary import WeeklyDiaryConfig
+        cfg = WeeklyDiaryConfig.from_env()
+        await cb.answer("Публикую…", show_alert=False)
+        reasons: list[str] = []
+        if cfg.weekly_diary_dry_run:
+            reasons.append("WEEKLY_DIARY_DRY_RUN=true. Публикация заблокирована.")
+        if not CHANNEL_ID:
+            reasons.append("CHANNEL_ID не задан в .env.")
+        if reasons:
+            try:
+                await cb.bot.send_message(
+                    OWNER_CHAT_ID,
+                    "🚫 <b>Публикация заблокирована флагами</b>\n\n" + "\n".join(
+                        f"• {html.escape(r, quote=False)}" for r in reasons
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        try:
+            await cb.bot.send_message(CHANNEL_ID, draft.post_html,
+                                      parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            log.exception("weekly_publish send to channel failed: %s", e)
+            try:
+                await cb.bot.send_message(OWNER_CHAT_ID,
+                                          f"❌ Ошибка публикации: {html.escape(str(e), quote=False)}",
+                                          parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+            return
+
+        draft.status = "published"
+        store.update(draft)
+        try:
+            _log_post_event(
+                "weekly_diary", published_to="channel",
+                title=((draft.claude_json or {}).get("title") or "Дневник недели")[:120],
+                source="weekly_callback",
+            )
+        except Exception:
+            pass
+        try:
+            await cb.bot.send_message(
+                OWNER_CHAT_ID,
+                f"✅ Weekly diary опубликован в {html.escape(CHANNEL_ID, quote=False)} "
+                f"(draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code>)",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    @dp.callback_query(F.data.startswith("weekly_reject:"))
+    async def on_weekly_reject(cb: CallbackQuery):
+        if not await _is_owner_cb(cb):
+            return
+        draft_id = cb.data.split(":", 1)[1]
+        store = _store()
+        draft = store.get(draft_id)
+        if not draft:
+            await cb.answer("Черновик не найден", show_alert=True)
+            return
+        if draft.status in ("published", "rejected"):
+            await cb.answer(f"Уже {draft.status}", show_alert=True)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        draft.status = "rejected"
+        store.update(draft)
+        await cb.answer("Отклонено.", show_alert=False)
+        try:
+            await cb.bot.send_message(
+                OWNER_CHAT_ID,
+                f"❌ Weekly diary отклонён (draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code>).",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
 # ---------- Stage 6b: news review callbacks ----------
 
 def _state_get_awaiting_news_edit() -> str:
@@ -3966,26 +4246,14 @@ async def send_post_with_optional_image(
 
     photo = FSInputFile(str(img))
 
-    if len(post_html) <= PHOTO_CAPTION_SAFE_LIMIT:
-        await bot.send_photo(
-            chat_id, photo,
-            caption=post_html,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-        )
-        return
-
-    # caption-split: photo с короткой подписью БЕЗ кнопок, кнопки — на полный текст
-    short = _build_short_caption(post_html, title=title, brief=brief)
+    # Stage 14: всегда photo+caption одним сообщением, без split.
+    # Upstream (truncate cascade + final_caption_guard в news pipeline,
+    # caption-fit в market posts) гарантирует ≤ 1024 chars.
+    # Если caption > 1024 — это баг upstream, падаем с TelegramBadRequest.
     await bot.send_photo(
         chat_id, photo,
-        caption=short,
+        caption=post_html,
         parse_mode=parse_mode,
-    )
-    await bot.send_message(
-        chat_id, post_html,
-        parse_mode=parse_mode,
-        disable_web_page_preview=disable_web_page_preview,
         reply_markup=reply_markup,
     )
 
@@ -4657,6 +4925,77 @@ async def _safe_author_note_job() -> None:
         log.exception("author_note job crashed: %s", e)
 
 
+# =============================================================================
+# Stage 13 — Weekly diary
+# =============================================================================
+
+async def _weekly_diary_preview_send(bot: Bot, text: str, kb_dict: dict) -> None:
+    if not OWNER_CHAT_ID:
+        log.warning("weekly_diary preview: OWNER_CHAT_ID не задан, skip")
+        return
+    await bot.send_message(
+        OWNER_CHAT_ID, text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=_keyboard_from_dict(kb_dict),
+    )
+
+
+async def _weekly_diary_send(bot: Bot, chat_id: str, text: str) -> None:
+    if not chat_id:
+        log.warning("weekly_diary send: chat_id пустой, skip")
+        return
+    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+async def run_weekly_diary_now_cmd() -> None:
+    """Stage 13: собрать дневник недели по history.json и отправить владельцу на ревью."""
+    from weekly_diary import WeeklyDiaryConfig, run_weekly_diary_now
+    cfg = WeeklyDiaryConfig.from_env()
+    if not cfg.enable_weekly_diary:
+        print("ENABLE_WEEKLY_DIARY=false — пропускаем")
+        return
+    if not CLAUDE_API_KEY:
+        raise RuntimeError("CLAUDE_API_KEY не задан — weekly_diary невозможен")
+    claude = Anthropic(api_key=CLAUDE_API_KEY)
+    bot = _new_trading_bot()
+    try:
+        result = await run_weekly_diary_now(
+            config=cfg,
+            claude=claude,
+            claude_model=CLAUDE_MODEL,
+            history_path=HISTORY_FILE,
+            drafts_path=WEEKLY_DIARY_FILE,
+            owner_chat_id=OWNER_CHAT_ID,
+            channel_id=CHANNEL_ID,
+            send_fn=lambda chat_id, text: _weekly_diary_send(bot, chat_id, text),
+            preview_send_fn=lambda text, kb: _weekly_diary_preview_send(bot, text, kb),
+        )
+        log.info("weekly_diary result: %s", result)
+        try:
+            if (result or {}).get("decision") == "preview_sent":
+                _log_post_event("weekly_diary", published_to="owner",
+                                title="Дневник недели", source="weekly_diary_cli")
+        except Exception:
+            pass
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        await bot.session.close()
+
+
+async def _safe_weekly_diary_job() -> None:
+    """Scheduler job: воскресенье 19:00 — собрать дневник недели и отправить
+    владельцу на ревью."""
+    try:
+        from weekly_diary import WeeklyDiaryConfig
+        cfg = WeeklyDiaryConfig.from_env()
+        if not cfg.enable_weekly_diary:
+            return
+        await run_weekly_diary_now_cmd()
+    except Exception as e:
+        log.exception("weekly_diary job crashed: %s", e)
+
+
 async def run_news_drafts_cmd() -> None:
     """Stage 6b: показать pending news drafts."""
     from news import DraftStore
@@ -4860,6 +5199,9 @@ def main() -> None:
                         help="(Stage 10) пометить конкретный author_note rejected")
     parser.add_argument("--content-mix", action="store_true",
                         help="(Stage 10+) показать 7-дневный content-mix breakdown + recommendation")
+    # Stage 13 — weekly diary
+    parser.add_argument("--weekly-now", action="store_true",
+                        help="(Stage 13) собрать дневник недели по history.json и отправить владельцу на ревью")
     # Stage 11 — render trade-card on demand
     parser.add_argument("--render-last-trade-visual", action="store_true",
                         help="(Stage 11) отрендерить trade-card для последней сделки и отправить владельцу")
@@ -4919,6 +5261,8 @@ def main() -> None:
         asyncio.run(run_reject_author_note_cmd(args.reject_author_note))
     elif args.content_mix:
         asyncio.run(run_content_mix_cmd())
+    elif args.weekly_now:
+        asyncio.run(run_weekly_diary_now_cmd())
     elif args.render_last_trade_visual:
         asyncio.run(run_render_trade_visual_cmd(None))
     elif args.render_trade_visual:
