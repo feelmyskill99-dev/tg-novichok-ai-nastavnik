@@ -14,6 +14,8 @@ from core.trade_state import (
     get_gate_screenshot,
     get_trade_channel_posts_today,
     increment_trade_channel_posts_today,
+    lookup_trade_by_message,
+    remember_trade_message,
     set_gate_screenshot,
     set_last_trade_scan_at,
     set_last_trade_tick_at,
@@ -189,3 +191,70 @@ def test_get_gate_screenshot_no_field_returns_none():
 def test_get_gate_screenshot_non_dict_field_returns_none():
     state = {"gate_screenshots": "garbage"}
     assert get_gate_screenshot(state, "t1") is None
+
+
+# ---------- trade_message_index ----------
+
+
+def test_remember_trade_message_creates_mapping():
+    state = {}
+    remember_trade_message(state, 42, "t1")
+    assert state["trade_message_index"] == {"42": "t1"}
+
+
+def test_remember_trade_message_zero_message_id_is_noop():
+    state = {}
+    remember_trade_message(state, 0, "t1")
+    assert "trade_message_index" not in state
+
+
+def test_remember_trade_message_empty_trade_id_is_noop():
+    state = {}
+    remember_trade_message(state, 42, "")
+    assert "trade_message_index" not in state
+
+
+def test_remember_trade_message_repairs_non_dict_field():
+    state = {"trade_message_index": "garbage"}
+    remember_trade_message(state, 42, "t1")
+    assert state["trade_message_index"] == {"42": "t1"}
+
+
+def test_remember_trade_message_respects_cap():
+    state = {}
+    for i in range(150):
+        remember_trade_message(state, 1000 + i, f"t{i}", cap=20)
+    assert len(state["trade_message_index"]) == 20
+    # последние 20 message_id должны остаться
+    assert "1149" in state["trade_message_index"]
+    assert "1000" not in state["trade_message_index"]
+
+
+def test_remember_trade_message_overwrites_existing():
+    state = {"trade_message_index": {"42": "old_trade"}}
+    remember_trade_message(state, 42, "new_trade")
+    assert state["trade_message_index"] == {"42": "new_trade"}
+
+
+def test_lookup_trade_by_message_returns_trade_id():
+    state = {"trade_message_index": {"42": "t1"}}
+    assert lookup_trade_by_message(state, 42) == "t1"
+
+
+def test_lookup_trade_by_message_zero_returns_none():
+    state = {"trade_message_index": {"42": "t1"}}
+    assert lookup_trade_by_message(state, 0) is None
+
+
+def test_lookup_trade_by_message_missing_returns_none():
+    state = {"trade_message_index": {"42": "t1"}}
+    assert lookup_trade_by_message(state, 99) is None
+
+
+def test_lookup_trade_by_message_no_field_returns_none():
+    assert lookup_trade_by_message({}, 42) is None
+
+
+def test_lookup_trade_by_message_non_dict_field_returns_none():
+    state = {"trade_message_index": "garbage"}
+    assert lookup_trade_by_message(state, 42) is None

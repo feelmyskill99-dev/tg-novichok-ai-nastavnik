@@ -78,3 +78,37 @@ def get_gate_screenshot(state: dict, trade_id: str) -> Optional[str]:
     if not isinstance(m, dict):
         return None
     return m.get(trade_id)
+
+
+def remember_trade_message(
+    state: dict,
+    message_id: int,
+    trade_id: str,
+    *,
+    cap: int = 100,
+) -> None:
+    """Запоминает map: telegram message_id → trade_id.
+
+    Используется чтобы reply на сообщение сделки мог идентифицировать
+    trade без явного аргумента. Держим rolling-cap последних `cap` записей.
+    """
+    if not message_id or not trade_id:
+        return
+    idx = state.get("trade_message_index") or {}
+    if not isinstance(idx, dict):
+        idx = {}
+    idx[str(message_id)] = trade_id
+    if len(idx) > cap:
+        keys = list(idx.keys())[-cap:]
+        idx = {k: idx[k] for k in keys}
+    state["trade_message_index"] = idx
+
+
+def lookup_trade_by_message(state: dict, message_id: int) -> Optional[str]:
+    """По telegram message_id находит trade_id (или None)."""
+    if not message_id:
+        return None
+    idx = state.get("trade_message_index") or {}
+    if not isinstance(idx, dict):
+        return None
+    return idx.get(str(message_id))

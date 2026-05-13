@@ -93,6 +93,8 @@ from core.trade_state import (
     get_gate_screenshot as _ts_get_gate_screenshot,
     get_trade_channel_posts_today as _ts_get_trade_posts,
     increment_trade_channel_posts_today as _ts_inc_trade_posts,
+    lookup_trade_by_message as _ts_lookup_trade_by_msg,
+    remember_trade_message as _ts_remember_trade_msg,
     set_gate_screenshot as _ts_set_gate_screenshot,
     set_last_trade_scan_at as _ts_set_scan_at,
     set_last_trade_tick_at as _ts_set_tick_at,
@@ -1705,31 +1707,13 @@ def _state_get_gate_screenshot(trade_id: str) -> str | None:
 
 
 def _state_remember_trade_message(message_id: int, trade_id: str) -> None:
-    """Map: telegram message_id → trade_id, чтобы reply на сообщение сделки
-    мог идентифицировать trade без явного аргумента."""
-    if not message_id or not trade_id:
-        return
     s = load_state()
-    idx = s.get("trade_message_index") or {}
-    if not isinstance(idx, dict):
-        idx = {}
-    idx[str(message_id)] = trade_id
-    # rolling cap
-    if len(idx) > TRADE_MSG_INDEX_CAP:
-        keys = list(idx.keys())[-TRADE_MSG_INDEX_CAP:]
-        idx = {k: idx[k] for k in keys}
-    s["trade_message_index"] = idx
+    _ts_remember_trade_msg(s, message_id, trade_id, cap=TRADE_MSG_INDEX_CAP)
     save_state(s)
 
 
 def _state_lookup_trade_by_message(message_id: int) -> str | None:
-    if not message_id:
-        return None
-    s = load_state()
-    idx = s.get("trade_message_index") or {}
-    if not isinstance(idx, dict):
-        return None
-    return idx.get(str(message_id))
+    return _ts_lookup_trade_by_msg(load_state(), message_id)
 
 
 def _lookup_trade_by_id(trade_id: str):
