@@ -72,6 +72,8 @@ def split_html_for_telegram(text: str, *, limit: int = 4096) -> list[str]:
     """Разрезать HTML-text на ≤limit-кусков, не разрезая открытые HTML-теги."""
     if not text or not text.strip():
         return []
+    # Защита от infinite loop при limit<=0: минимум 1 символ за итерацию.
+    limit = max(1, limit)
     text = text.strip()
 
     chunks: list[str] = []
@@ -82,6 +84,7 @@ def split_html_for_telegram(text: str, *, limit: int = 4096) -> list[str]:
             break
         chunk, remaining = _split_one(remaining, limit)
         if not chunk:
+            # fallback hard cut: гарантирует progress (limit>=1)
             chunks.append(remaining[:limit])
             remaining = remaining[limit:].lstrip()
             continue
