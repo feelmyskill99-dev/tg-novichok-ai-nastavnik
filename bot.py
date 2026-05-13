@@ -89,6 +89,15 @@ from core.content_mix_writer import (
 )
 from core.post_tags import merge_tags as _merge_post_tags
 from core.html_safe import escape_html as _escape_html
+from core.trade_state import (
+    get_gate_screenshot as _ts_get_gate_screenshot,
+    get_trade_channel_posts_today as _ts_get_trade_posts,
+    increment_trade_channel_posts_today as _ts_inc_trade_posts,
+    set_gate_screenshot as _ts_set_gate_screenshot,
+    set_last_trade_scan_at as _ts_set_scan_at,
+    set_last_trade_tick_at as _ts_set_tick_at,
+    today_utc_iso as _ts_today_utc_iso,
+)
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -1610,44 +1619,32 @@ def _make_trade_send_fn(bot: Bot):
 
 # ---------- state helpers для trade-блока ---------------------------------
 
+# Этап 2.4 шаг 4: pure-state-mutators живут в core.trade_state.
+# Эти обёртки добавляют load_state/save_state I/O.
+
 def _today_utc_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    return _ts_today_utc_iso()
 
 
 def _state_get_trade_channel_posts_today() -> int:
-    """Возвращает количество торговых постов в канал за сегодня (UTC).
-
-    Если в state.json дата не сегодня — считаем 0 (счётчик протух).
-    """
-    s = load_state()
-    if s.get("trade_channel_posts_date") != _today_utc_iso():
-        return 0
-    try:
-        return int(s.get("trade_channel_posts_today") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return _ts_get_trade_posts(load_state())
 
 
 def _state_increment_trade_channel_posts_today() -> None:
     s = load_state()
-    today = _today_utc_iso()
-    if s.get("trade_channel_posts_date") != today:
-        s["trade_channel_posts_today"] = 1
-        s["trade_channel_posts_date"] = today
-    else:
-        s["trade_channel_posts_today"] = int(s.get("trade_channel_posts_today") or 0) + 1
+    _ts_inc_trade_posts(s)
     save_state(s)
 
 
 def _state_set_last_scan_at(ts: str) -> None:
     s = load_state()
-    s["last_trade_scan_at"] = ts
+    _ts_set_scan_at(s, ts)
     save_state(s)
 
 
 def _state_set_last_tick_at(ts: str) -> None:
     s = load_state()
-    s["last_trade_tick_at"] = ts
+    _ts_set_tick_at(s, ts)
     save_state(s)
 
 
@@ -1692,22 +1689,16 @@ def _state_set_gate_screenshot(trade_id: str, path: str) -> None:
     if not trade_id:
         return
     s = load_state()
-    m = s.get("gate_screenshots") or {}
-    if not isinstance(m, dict):
-        m = {}
-    m[trade_id] = path
-    s["gate_screenshots"] = m
+    _ts_set_gate_screenshot(s, trade_id, path)
     save_state(s)
 
 
 def _state_get_gate_screenshot(trade_id: str) -> str | None:
-    if not trade_id:
-        return None
-    s = load_state()
-    m = s.get("gate_screenshots") or {}
-    if not isinstance(m, dict):
-        return None
-    p = m.get(trade_id)
+    """Возвращает путь скриншота если файл существует на диске; иначе None.
+
+    Существование файла проверяется здесь (это I/O), а не в pure-helper.
+    """
+    p = _ts_get_gate_screenshot(load_state(), trade_id)
     if p and Path(p).exists():
         return p
     return None
