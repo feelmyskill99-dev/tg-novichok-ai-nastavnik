@@ -3451,11 +3451,18 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         )
 
     async def _send_preview(bot: Bot, draft) -> None:
-        from news import NewsItem, validate_payload_for_publish
-        sn = draft.source_news
+        """Stage 14: превью владельцу = header сообщение + (опц.guard) + сам пост.
+
+        Сам пост идёт точно так, как пошёл бы в канал — фото+caption или text-only.
+        Header не вмешивается в HTML поста чтобы не превышать caption-лимит 1024.
+        """
+        from news import NewsItem, validate_payload_for_publish, validate_payload_v2
+        sn = draft.source_news or {}
         sector = html.escape(sn.get("sector") or "-", quote=False)
         impact = int(sn.get("impact_score") or 0)
-        # пересчитываем guard-причины на лету (после revise/regenerate они могут пропасть)
+        cj = draft.claude_json or {}
+        schema_version = getattr(draft, "schema_version", "v1")
+        tone = str(cj.get("tone") or "-")
         try:
             _item = NewsItem(
                 title=sn.get("title") or "",
@@ -3468,28 +3475,46 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
                 sector=sn.get("sector") or "other",
                 impact_score=float(sn.get("impact_score") or 0.0),
             )
-            guard = validate_payload_for_publish(draft.claude_json or {}, _item)
+            if schema_version == "v2":
+                guard = validate_payload_v2(cj, _item)
+            else:
+                guard = validate_payload_for_publish(cj, _item)
         except Exception:
             guard = []
-        head_lines = [
-            "🧪 <b>Превью новостного поста — нужен ревью</b>",
-            f"draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code> | "
-            f"sector: {sector} | impact: {impact} | rev: {draft.revision_count}",
-        ]
+
+        # 1) Header — отдельное мини-сообщение
+        header = (
+            f"🧪 Превью #<code>{html.escape(draft.draft_id[:8], quote=False)}</code> · "
+            f"sector={sector} · impact={impact} · "
+            f"tone={html.escape(tone, quote=False)} · rev={draft.revision_count}"
+        )
         if draft.image_path:
-            head_lines.append(f"🖼 image: <code>{html.escape(Path(draft.image_path).name, quote=False)}</code>")
+            header += f"\n🖼 {html.escape(Path(draft.image_path).name, quote=False)}"
+        try:
+            await bot.send_message(
+                OWNER_CHAT_ID, header,
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.warning("_send_preview header failed: %s", e)
+
+        # 2) (опц.) guard reasons
         if guard:
-            head_lines.append("")
-            head_lines.append("🚫 <b>Publish-guard:</b>")
-            for r in guard[:6]:
-                head_lines.append(f"• {html.escape(r, quote=False)}")
-            head_lines.append("Исправь правкой ✏️ / перегенерь 🔁 / 🖼 — потом ✅.")
-        head_lines.append("──────────────")
-        head = "\n".join(head_lines)
-        cj = draft.claude_json or {}
+            guard_text = "🚫 <b>Publish-guard:</b>\n" + "\n".join(
+                f"• {html.escape(r, quote=False)}" for r in guard[:6]
+            ) + "\nИсправь правкой ✏️ / перегенерь 🔁 / 🖼 — потом ✅."
+            try:
+                await bot.send_message(
+                    OWNER_CHAT_ID, guard_text,
+                    parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                )
+            except Exception as e:
+                log.warning("_send_preview guard failed: %s", e)
+
+        # 3) Сам пост — как в канал, с кнопками
         await send_post_with_optional_image(
             bot, OWNER_CHAT_ID,
-            head + "\n\n" + draft.post_html,
+            draft.post_html,
             draft.image_path or None,
             title=str(cj.get("specific_title") or ""),
             brief=str(cj.get("brief_review") or cj.get("short_summary") or ""),
@@ -4353,14 +4378,53 @@ async def _news_preview_send(
     text: str,
     kb_dict: dict,
     image_path: Optional[str] = None,
+    meta: Optional[dict] = None,
 ) -> None:
-    """Адаптер под NewsPublisher.PreviewSendFn — превью владельцу с inline-кнопками."""
+    """Stage 14 — превью владельцу: header + (опц.guard) + сам пост с кнопками.
+
+    Полученный пост шлётся точно как в канал (photo+caption или text-only).
+    Header и guard идут отдельными короткими сообщениями ДО поста, чтобы
+    визуально не загрязнять сам пост.
+    """
     if not OWNER_CHAT_ID:
         log.warning("news preview: OWNER_CHAT_ID не задан, skip")
         return
+
+    if meta:
+        draft_id = str(meta.get("draft_id") or "")[:8]
+        sector = str(meta.get("sector") or "-")
+        impact = int(meta.get("impact") or 0)
+        tone = str(meta.get("tone") or "-")
+        header_text = (
+            f"🧪 Превью #{html.escape(draft_id)} · "
+            f"sector={html.escape(sector)} · impact={impact} · tone={html.escape(tone)}"
+        )
+        try:
+            await bot.send_message(
+                OWNER_CHAT_ID, header_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.warning("news preview header send failed: %s", e)
+
+        guard_reasons = list(meta.get("guard_reasons") or [])
+        if guard_reasons:
+            guard_text = "🚫 <b>Publish-guard заблокировал автопубликацию:</b>\n" + "\n".join(
+                f"• {html.escape(r, quote=False)}" for r in guard_reasons[:6]
+            )
+            try:
+                await bot.send_message(
+                    OWNER_CHAT_ID, guard_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                log.warning("news preview guard send failed: %s", e)
+
     await send_post_with_optional_image(
         bot, OWNER_CHAT_ID, text, image_path,
-        reply_markup=_keyboard_from_dict(kb_dict),
+        reply_markup=_keyboard_from_dict(kb_dict) if kb_dict else None,
     )
 
 
@@ -4459,7 +4523,7 @@ async def run_news_now_cmd() -> None:
             claude_model=CLAUDE_MODEL,
             market_snapshot=_market_snapshot_for_news(),
             drafts_path=NEWS_DRAFTS_FILE,
-            preview_send_fn=lambda text, kb, image_path=None: _news_preview_send(bot, text, kb, image_path),
+            preview_send_fn=lambda text, kb, image_path=None, meta=None: _news_preview_send(bot, text, kb, image_path, meta),
             image_provider=_news_image_provider,
             counter_get=_state_get_news_post_counter,
             counter_inc=_state_inc_news_post_counter,
