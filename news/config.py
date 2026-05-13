@@ -5,20 +5,20 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from core.env_helpers import env_bool, env_int, env_str
 
+
+# Этап 2.3: алиасы; реальная логика в core/env_helpers.
 def _bool(name: str, default: bool) -> bool:
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    return env_bool(name, default=default)
 
 
 def _int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+    return env_int(name, default=default)
 
 
 def _str(name: str, default: str) -> str:
-    return os.getenv(name, default).strip()
+    return env_str(name, default=default)
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,9 @@ class NewsConfig:
     news_source_image_save_dir: str = "outputs/news_source_images"
     news_generated_image_save_dir: str = "outputs/news_images"
 
+    # Stage 14 — news format version. "v2" = compact voiced posts, "v1" = legacy 9-section.
+    news_format_version: str = "v2"
+
     @classmethod
     def from_env(cls) -> "NewsConfig":
         return cls(
@@ -92,4 +95,6 @@ class NewsConfig:
             news_image_fallback_to_generated=_bool("NEWS_IMAGE_FALLBACK_TO_GENERATED", False),
             news_source_image_save_dir=_str("NEWS_SOURCE_IMAGE_SAVE_DIR", "outputs/news_source_images"),
             news_generated_image_save_dir=_str("NEWS_GENERATED_IMAGE_SAVE_DIR", "outputs/news_images"),
+
+            news_format_version=_str("NEWS_FORMAT_VERSION", "v2").lower(),
         )

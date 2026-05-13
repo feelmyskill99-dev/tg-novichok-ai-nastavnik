@@ -42,9 +42,12 @@ MAX_DRAFTS = 60
 SHORT_DISCLAIMER = "Не финсовет. Это дневник обучения и AI-разбор."
 
 
+from core.env_helpers import env_bool as _env_bool
+
+
+# Этап 2.3: алиас; реальная логика в core/env_helpers.
 def _bool(name: str, default: bool) -> bool:
-    import os
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    return _env_bool(name, default=default)
 
 
 @dataclass(frozen=True)

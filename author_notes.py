@@ -45,17 +45,16 @@ SHORT_DISCLAIMER = "Не финсовет. Это дневник обучени�
 # CONFIG
 # =============================================================================
 
+from core.env_helpers import env_bool as _env_bool, env_int as _env_int
+
+
+# Этап 2.3: алиасы; реальная логика в core/env_helpers.
 def _bool(name: str, default: bool) -> bool:
-    import os
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    return _env_bool(name, default=default)
 
 
 def _int(name: str, default: int) -> int:
-    import os
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+    return _env_int(name, default=default)
 
 
 @dataclass(frozen=True)
