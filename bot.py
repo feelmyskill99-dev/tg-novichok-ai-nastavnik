@@ -88,6 +88,7 @@ from core.content_mix_writer import (
     migrate_state as _cmw_migrate_state,
 )
 from core.post_tags import merge_tags as _merge_post_tags
+from core.html_safe import escape_html as _escape_html
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -861,7 +862,8 @@ def generate_image(openai_client: OpenAI, prompt: str, out_path: Path) -> Path |
 # =============================================================================
 
 def esc(s) -> str:
-    return html.escape("" if s is None else str(s), quote=False)
+    """Этап 2.4 шаг 3: тонкая обёртка над core.html_safe.escape_html."""
+    return _escape_html(s)
 
 
 def build_post_html(
