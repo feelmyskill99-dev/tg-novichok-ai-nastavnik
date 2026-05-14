@@ -113,6 +113,7 @@ from core.image_intent import (
     looks_like_image_request as _ii_any_request,
     looks_like_source_image_request as _ii_source_request,
 )
+from core.log_dump import safe_log_dict as _ld_safe_log_dict
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -2238,11 +2239,8 @@ def cfg_use_claude_for_trades() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-def _safe_log_dict(d) -> str:
-    try:
-        return json.dumps(d, ensure_ascii=False, default=str)[:500]
-    except Exception:
-        return str(d)[:500]
+# Этап 2.4 шаг 8: safe_log_dict живёт в core.log_dump.
+_safe_log_dict = _ld_safe_log_dict
 
 
 # ---------- scheduler jobs (Stage 7) ---------------------------------------
