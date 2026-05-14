@@ -108,6 +108,11 @@ from core.draft_state import (
     increment_news_post_counter as _ds_inc_news_counter,
     set_awaiting_edit as _ds_set_awaiting_edit,
 )
+from core.image_intent import (
+    looks_like_ai_image_request as _ii_ai_request,
+    looks_like_image_request as _ii_any_request,
+    looks_like_source_image_request as _ii_source_request,
+)
 styleguard: Optional[StyleGuard] = None
 mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
@@ -2925,79 +2930,10 @@ def _state_inc_news_post_counter() -> int:
     return new_val
 
 
-# Stage 12e — image-intent triggers, разделённые на два класса:
-# AI-intent → вызвать OpenAI (через news_generate_ai_image),
-# source-intent → вытащить og:image из источника (через news_refresh_source_image).
-# Default: AI-намерение требует явных слов «сгенери» / «нарисуй» / «AI-картинка».
-# Source-намерение: «возьми из источника», «обнови превью», «og image».
-
-_AI_IMAGE_PATTERNS = (
-    "сгенери",                  # сгенери / сгенерируй
-    "нарисуй",
-    "сделай ai-картин",
-    "сделай ии-картин",
-    "сделай arт",
-    "сделай арт",
-    "новая ai",
-    "новую ai",
-    "ai-картин",
-    "ии-картин",
-    "ai картин",
-    "ии картин",
-    "тематичес",                # «сгенерируй тематическое изображение»
-    "перерисуй картин",
-    "перегенери картин",
-    "regenerate image",
-    "generate image",
-    "new image",
-    "another image",
-    "🖼",
-)
-
-_SOURCE_IMAGE_PATTERNS = (
-    "из источника",             # «возьми картинку из источника»
-    "превью источника",
-    "обнови превью",
-    "обнови картин",            # «обнови картинку из источника»
-    "source image",
-    "og image",
-    "og:image",
-    "twitter:image",
-    "🔄",
-)
-
-
-def _looks_like_ai_image_request(text: str) -> bool:
-    s = (text or "").strip().lower()
-    if not s or len(s) > 80:
-        return False
-    if "ai" in s and ("картин" in s or "изображ" in s):
-        return True
-    if any(p in s for p in _AI_IMAGE_PATTERNS):
-        return True
-    # «сделай картинку», «новую картинку» — без префикса AI считаются AI (legacy backward-compat),
-    # но только если нет явного source-маркера в той же фразе.
-    if "из источник" in s or "source" in s or "og:" in s:
-        return False
-    if "картин" in s and ("сгенери" in s or "нарисуй" in s or "сделай" in s
-                          or "новая" in s or "новую" in s or "перерисуй" in s):
-        return True
-    if "изображ" in s and ("сгенери" in s or "нарисуй" in s or "сделай" in s
-                           or "новое" in s or "перерисуй" in s):
-        return True
-    return False
-
-
-def _looks_like_source_image_request(text: str) -> bool:
-    s = (text or "").strip().lower()
-    if not s or len(s) > 80:
-        return False
-    return any(p in s for p in _SOURCE_IMAGE_PATTERNS)
-
-
-# legacy alias — оставлен на случай если в коде ещё есть вызовы; делегирует к AI-варианту
-def _looks_like_image_request(text: str) -> bool:
-    return _looks_like_ai_image_request(text) or _looks_like_source_image_request(text)
+# Этап 2.4 шаг 7: image-intent логика и patterns теперь в core.image_intent.
+_looks_like_ai_image_request = _ii_ai_request
+_looks_like_source_image_request = _ii_source_request
+_looks_like_image_request = _ii_any_request
 
 
 def _rebuild_draft_post_html(draft) -> None:
