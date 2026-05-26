@@ -1,11 +1,4 @@
-"""Генерирует аватар канала через OpenAI Image API и шлёт владельцу для ручной установки.
-
-Сохраняет:
-    outputs/images/channel_avatar.png
-
-Не пытается ставить аватар через Telegram API автоматически — спецификация требует
-ручной установки. Просто отправляет файл OWNER_CHAT_ID.
-"""
+"""Генерирует 4 варианта эмблемы канала через OpenAI API и отправляет владельцу."""
 
 from __future__ import annotations
 
@@ -22,7 +15,7 @@ import aiohttp
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, InputMediaPhoto
 from openai import OpenAI
 
 
@@ -31,13 +24,13 @@ load_dotenv(dotenv_path=ROOT / ".env")
 
 
 PROMPT = (
-    "A circular Telegram avatar for a Russian crypto learning diary channel. "
-    "A nervous beginner trader sits in front of a dark crypto chart, while a calm "
-    "AI mentor hologram observes and analyzes the screen. "
-    "Mood: honest, cinematic, intelligent, not luxury, not aggressive. "
-    "Dark cyberpunk minimalism, blue-gray neon tones, subtle red and green candle "
-    "chart glow. No bulls, no rockets, no money rain, no text, no letters. "
-    "Clean icon composition, readable at small size."
+    "Geometric emblem, single symbol, no people, no humanoid figures, "
+    "no hamsters, no animals, no chart background, no text, no letters, "
+    "no cyberpunk, no neon. "
+    "Stylized aperture / iris diaphragm with a single japanese candlestick at the center. "
+    "Warm amber or ochre accent on dark charcoal background, two colors only. "
+    "Minimal vector-style geometric design, flat, readable at 40px. "
+    "Centered composition for a circular Telegram avatar."
 )
 
 
@@ -48,10 +41,7 @@ class _ThreadedResolverSession(AiohttpSession):
 
 
 def _generate_image(out_path: Path) -> str:
-    """Возвращает 'gpt-image-2'/'gpt-image-1' — какой модели удалось.
-
-    Сохраняет файл в out_path.
-    """
+    """Сохраняет файл и возвращает имя модели ('gpt-image-2'/'gpt-image-1')."""
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY не задан")
@@ -79,44 +69,76 @@ def _generate_image(out_path: Path) -> str:
     raise RuntimeError(f"all image models failed: {last_err}")
 
 
-async def _send_to_owner(image_path: Path, model_used: str) -> None:
+async def _send_to_owner(paths: list[Path], models: list[str]) -> None:
     token = (os.getenv("TELEGRAM_TOKEN") or "").strip()
     owner = (os.getenv("OWNER_CHAT_ID") or "").strip()
     if not token or not owner:
         print("TELEGRAM_TOKEN или OWNER_CHAT_ID пустые — отправка пропущена", file=sys.stderr)
         return
 
+    model_str = ", ".join(sorted(set(models)))
+    # Общая часть подписи
+    caption = (
+        "🖼 [AVATAR CANDIDATES — EMBLEM]\n"
+        f"Модель: <code>{model_str}</code>\n"
+        f"Файлы: outputs/images/avatar_candidates/emblem_*.png\n\n"
+        "Выбери номер (1–4), и я поставлю через setChatPhoto."
+    )
+
     bot = Bot(token=token, session=_ThreadedResolverSession())
     try:
-        caption = (
-            "<b>🖼 [CHANNEL AVATAR]</b>\n"
-            f"Сгенерировано через <code>{model_used}</code>.\n"
-            f"Файл сохранён: <code>outputs/images/channel_avatar.png</code>\n\n"
-            "Установи вручную в Telegram: "
-            "<i>Settings → Edit channel → Photo → выбрать файл</i>.\n"
-            "Автоматическая установка через Bot API не используется (по спецификации)."
-        )
-        await bot.send_photo(
-            owner,
-            photo=FSInputFile(str(image_path)),
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-        )
+        if len(paths) == 1:
+            await bot.send_photo(
+                owner,
+                photo=FSInputFile(str(paths[0])),
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            media = []
+            for idx, p in enumerate(paths):
+                if idx == 0:
+                    media.append(
+                        InputMediaPhoto(
+                            media=FSInputFile(str(p)),
+                            caption=caption,
+                            parse_mode=ParseMode.HTML,
+                        )
+                    )
+                else:
+                    media.append(InputMediaPhoto(media=FSInputFile(str(p))))
+            await bot.send_media_group(owner, media=media)
     finally:
         await bot.session.close()
 
 
 def main() -> int:
-    out = ROOT / "outputs" / "images" / "channel_avatar.png"
-    try:
-        model_used = _generate_image(out)
-    except Exception as e:
-        print(f"AVATAR GENERATION FAILED: {type(e).__name__}", file=sys.stderr)
+    out_dir = ROOT / "outputs" / "images" / "avatar_candidates"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Очистка старых emblem_*.png
+    for old in out_dir.glob("emblem_*.png"):
+        old.unlink()
+
+    successful: list[Path] = []
+    models_used: list[str] = []
+
+    for i in range(1, 5):
+        out_path = out_dir / f"emblem_{i:02d}.png"
+        try:
+            model = _generate_image(out_path)
+            successful.append(out_path)
+            models_used.append(model)
+            print(f"generated: {out_path.relative_to(ROOT)} (model: {model})")
+        except Exception as e:
+            print(f"failed emblem_{i:02d}: {type(e).__name__}: {e}", file=sys.stderr)
+
+    if not successful:
+        print("ALL 4 VARIANTS FAILED", file=sys.stderr)
         return 1
-    print(f"saved: {out.relative_to(ROOT)}")
-    print(f"model: {model_used}")
-    asyncio.run(_send_to_owner(out, model_used))
-    print("sent to OWNER_CHAT_ID")
+
+    asyncio.run(_send_to_owner(successful, models_used))
+    print(f"sent {len(successful)} variant(s) to OWNER_CHAT_ID")
     return 0
 
 
