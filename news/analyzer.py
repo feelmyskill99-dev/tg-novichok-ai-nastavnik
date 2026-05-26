@@ -207,6 +207,7 @@ class NewsAnalyzer:
         *,
         market_snapshot: Optional[dict] = None,
         previous_phrases_to_avoid: Optional[list[str]] = None,
+        mistake_theme_hint: Optional[dict] = None,
     ) -> dict:
         """Возвращает распарсенный JSON от Claude. Если Claude решил не публиковать —
         в ответе будет should_publish=false.
@@ -214,6 +215,9 @@ class NewsAnalyzer:
         Stage 12f — `previous_phrases_to_avoid`: список «уже использованных» фраз
         из недавних published-постов; Claude должен не повторять ни их формулировки,
         ни их метафоры.
+
+        Stage 14 — `mistake_theme_hint`: опциональная подсказка для каждого 5-го поста
+        (см. inject_mistake_theme). Передаётся Claude как-есть.
         """
         if not items:
             return {"should_publish": False, "reason": "news_batch пустой"}
@@ -227,6 +231,8 @@ class NewsAnalyzer:
             "sarcasm_level": self.cfg.news_sarcasm_level,
             "previous_phrases_to_avoid": previous_phrases_to_avoid or [],
         }
+        if mistake_theme_hint:
+            user_payload["mistake_theme_hint"] = mistake_theme_hint
 
         resp = self.claude.messages.create(
             model=self.model,

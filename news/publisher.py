@@ -7,7 +7,7 @@ Stage 12b: единый строгий формат поста (specific_title �
 
 Публикует в канал только если:
     ENABLE_NEWS=true
-    NEWS_PUBLISH_TO_CHANNEL=true
+    NEWS_PUBLISH_TO_CHANNEL=true  ИЛИ  impact_score >= NEWS_AUTO_PUBLISH_MIN_IMPACT (если >0)
     NEWS_DRY_RUN=false
     impact_score >= NEWS_MIN_IMPACT_SCORE
     payload прошёл validate_payload_for_publish()
@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import logging
+import random
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from .config import NewsConfig
@@ -33,8 +36,9 @@ from .drafts import DraftStore, create_draft_from, review_keyboard
 log = logging.getLogger("news.publisher")
 
 
-PreviewSendFn = Callable[[str, dict, Optional[str]], Awaitable[None]]
-# (html_text, inline_keyboard_dict, image_path_or_None) -> await
+PreviewSendFn = Callable[[str, dict, Optional[str], Optional[dict]], Awaitable[None]]
+# (post_html, inline_keyboard_dict, image_path_or_None, preview_meta_or_None) -> await
+# preview_meta: {"draft_id": str, "sector": str, "impact": int, "tone": str, "guard_reasons": list} | None
 
 
 SendFn = Callable[[str, str, Optional[str]], Awaitable[None]]
@@ -71,6 +75,35 @@ SECTOR_RUBRIC: dict[str, str] = {
     "political_market_noise":        "#шум_рынка",
     "scam_radar":                    "#скам_радар",
     "memecoins_low_priority":        "#не_будь_хомяком",
+}
+
+# Stage 14 — тональности по секторам. Если несколько кандидатов — детерминированный выбор.
+SECTOR_TONE_MAP: dict[str, list[str]] = {
+    "security_hacks_scams":         ["harsh"],
+    "scam_radar":                   ["harsh"],
+    "memecoins_low_priority":       ["harsh", "ironic"],
+    "macro":                        ["confused"],
+    "regulation_etf_institutional": ["confused"],
+    "political_market_noise":       ["ironic"],
+    "rwa_tokenization":             ["calm"],
+    "depin_infrastructure":         ["calm"],
+    "stablecoins":                  ["calm"],
+    "ai_crypto":                    ["calm"],
+}
+
+# Stage 14 — эмодзи-фолбэк по сектору (когда Claude не вернул title_emoji).
+SECTOR_EMOJI_FALLBACK: dict[str, str] = {
+    "security_hacks_scams":         "🤝",
+    "scam_radar":                   "🕵️",
+    "regulation_etf_institutional": "🏛️",
+    "macro":                        "🌍",
+    "ai_crypto":                    "🤖",
+    "stablecoins":                  "💵",
+    "memecoins_low_priority":       "🎪",
+    "rwa_tokenization":             "🏗️",
+    "depin_infrastructure":         "🏗️",
+    "political_market_noise":       "🧨",
+    "other":                        "🗒️",
 }
 
 # Stage 12b — fallback image-prompt по сектору. Используется когда Claude не вернул
@@ -184,6 +217,89 @@ def is_generic_title(title: str) -> bool:
     return False
 
 
+def pick_tone(item: "NewsItem", revision_count: int = 0) -> str:
+    """Stage 14 — детерминированный выбор тональности по сектору.
+
+    Если сектор имеет одного кандидата — он.
+    Если несколько — tones[news_hash(item) % len(tones)].
+    При revision_count > 0 — сдвиг для разнообразия при регенерации.
+    """
+    sector = (item.sector or "other").strip()
+    candidates = SECTOR_TONE_MAP.get(sector, ["calm"])
+    idx = int(news_hash(item), 16) % len(candidates)
+    if revision_count > 0:
+        idx = (idx + revision_count) % len(candidates)
+    return candidates[idx]
+
+
+def normalize_payload_v2(payload: dict, item: "NewsItem", revision_count: int = 0) -> dict:
+    """Stage 14 — единая точка fallback-логики для v2 payload.
+
+    Возвращает новый dict (вход не модифицируется):
+    - title_emoji: если пусто → SECTOR_EMOJI_FALLBACK[sector]
+    - tone: если не из enum → pick_tone(item, revision_count)
+    - facts: cleanup whitespace и фильтр пустых строк
+    - hashtags: применяем merge_hashtags (rubric + assets + claude)
+    """
+    p = dict(payload)
+    sector = (item.sector or "other").strip()
+
+    emoji = str(p.get("title_emoji") or "").strip()
+    if not emoji:
+        p["title_emoji"] = SECTOR_EMOJI_FALLBACK.get(sector, "🗒️")
+
+    tone = str(p.get("tone") or "").strip().lower()
+    if tone not in ("harsh", "confused", "ironic", "calm"):
+        p["tone"] = pick_tone(item, revision_count)
+    else:
+        p["tone"] = tone
+
+    facts_raw = _safe_list(p.get("facts"))
+    p["facts"] = [str(f).strip() for f in facts_raw if str(f).strip()]
+
+    p["hashtags"] = merge_hashtags(
+        claude_tags=p.get("hashtags") or [],
+        sector=sector,
+        assets=item.assets or [],
+    )
+
+    return p
+
+
+def inject_mistake_theme(payload: dict, *, counter: int, revision_count: int = 0,
+                         themes_path: str = "mistake_themes.json") -> dict:
+    """Stage 14 — каждый 5-й пост получает hint с темой ошибки новичка.
+
+    Возвращает (возможно модифицированный) payload. Если инжект не нужен — payload as-is.
+    При revision_count > 0 инжект сохраняется (та же тема), чтобы не путать Claude.
+    """
+    next_post_number = counter + 1
+    if next_post_number % 5 != 0:
+        return payload
+
+    try:
+        themes = json.loads(Path(themes_path).read_text(encoding="utf-8"))
+    except Exception:
+        return payload
+
+    if not themes:
+        return payload
+
+    # Детерминированный выбор темы: хэш от counter, чтобы при регенерации та же тема
+    theme_keys = sorted(themes.keys())
+    theme_idx = (counter // 5) % len(theme_keys)
+    theme = themes[theme_keys[theme_idx]]
+
+    payload["mistake_theme_hint"] = {
+        "title": theme.get("title", ""),
+        "instruction": (
+            "Если уместно к новости — вплети мысль из этой темы в newbie_voice. "
+            "Если нерелевантно — игнорируй."
+        ),
+    }
+    return payload
+
+
 def neutral_sector_header(sector: str) -> str:
     """Stage 12b: нейтральный fallback (используется ТОЛЬКО при render preview когда
     Claude всё-таки вернул дырявый payload, а build_html нужно показать владельцу).
@@ -209,12 +325,9 @@ def neutral_sector_header(sector: str) -> str:
 
 
 def _system_hashtags_for_sector(sector: str) -> list[str]:
-    """Системные хэштеги, которые ставим всегда (плюс секторная рубрика)."""
-    if sector == "political_market_noise":
-        return ["#шум_рынка", "#новости_без_паники", "#крипта"]
-    if sector == "scam_radar":
-        return ["#скам_радар", "#безопасность_депозита", "#не_будь_хомяком"]
-    return ["#новости", "#крипта"]
+    """Stage 14: только рубрика + активы. Без #новости / #крипта (шум)."""
+    rubric = SECTOR_RUBRIC.get(sector, "")
+    return [rubric] if rubric else []
 
 
 def image_prompt_for(item: NewsItem, claude_hint: str = "") -> str:
@@ -230,6 +343,44 @@ def image_prompt_for(item: NewsItem, claude_hint: str = "") -> str:
     if "no text" not in base.lower():
         base = base.rstrip(" .,") + "," + suffix
     return base
+
+
+def merge_hashtags(claude_tags: list[str], sector: str, assets: list[str]) -> list[str]:
+    """Stage 14 — мерж хэштегов для v2 поста, max 4.
+
+    Порядок:
+    1. Sector rubric (из SECTOR_RUBRIC) — всегда первый, 1 слот
+    2. Asset tags (#BTC, #ETH) из assets[:2] — макс 2 слота
+    3. Claude thematic tags — добивают до total ≤ 4
+    4. Дедупликация регистронезависимая с сохранением порядка
+    """
+    tags: list[str] = []
+
+    rubric = SECTOR_RUBRIC.get(sector, "")
+    if rubric:
+        tags.append(rubric)
+
+    for a in (assets or [])[:2]:
+        if a in ("BTC", "ETH"):
+            tags.append(f"#{a}")
+
+    for t in (claude_tags or []):
+        t = str(t).strip()
+        if not t:
+            continue
+        if not t.startswith("#"):
+            t = f"#{t}"
+        tags.append(t)
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in tags:
+        key = t.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
+
+    return unique[:4]
 
 
 # --- publish-guard ------------------------------------------------------------
@@ -282,7 +433,231 @@ def validate_payload_for_publish(payload: dict, item: NewsItem) -> list[str]:
     return reasons
 
 
-# --- HTML render --------------------------------------------------------------
+# --- publish-guard v2 (Stage 14) ---------------------------------------------
+
+def validate_payload_v2(payload: dict, item: "NewsItem") -> list[str]:
+    """Stage 14 publish-guard для v2 формата. Возвращает список причин блокировки."""
+    if not isinstance(payload, dict):
+        return ["payload не dict (Claude вернул не-JSON)"]
+
+    reasons: list[str] = []
+
+    if not payload.get("should_publish"):
+        reasons.append("Claude вернул should_publish=false")
+
+    title = str(payload.get("specific_title") or "").strip()
+    if not title:
+        reasons.append("specific_title пустой")
+    elif len(title) < 12:
+        reasons.append(f"specific_title слишком короткий ({len(title)} < 12 chars)")
+    elif len(title) > 80:
+        reasons.append(f"specific_title слишком длинный ({len(title)} > 80 chars)")
+    elif is_generic_title(title):
+        reasons.append(f"specific_title попадает в blacklist generic-заголовков: «{title[:80]}»")
+
+    lead = str(payload.get("lead") or "").strip()
+    if not lead:
+        reasons.append("lead пустой")
+    elif len(lead) < 80:
+        reasons.append(f"lead слишком короткий ({len(lead)} < 80 chars)")
+    elif len(lead) > 200:
+        reasons.append(f"lead слишком длинный ({len(lead)} > 200 chars)")
+
+    facts = _safe_list(payload.get("facts"))
+    if len(facts) != 3:
+        reasons.append(f"facts должно быть ровно 3, получено {len(facts)}")
+    else:
+        for i, f in enumerate(facts):
+            if len(f) < 30:
+                reasons.append(f"fact[{i}] слишком короткий ({len(f)} < 30 chars)")
+            elif len(f) > 110:
+                reasons.append(f"fact[{i}] слишком длинный ({len(f)} > 110 chars)")
+
+    nv = str(payload.get("newbie_voice") or "").strip()
+    if not nv:
+        reasons.append("newbie_voice пустой")
+    elif len(nv) < 30:
+        reasons.append(f"newbie_voice слишком короткий ({len(nv)} < 30 chars)")
+    elif len(nv) > 200:
+        reasons.append(f"newbie_voice слишком длинный ({len(nv)} > 200 chars)")
+
+    tone = str(payload.get("tone") or "").strip().lower()
+    if tone not in ("harsh", "confused", "ironic", "calm"):
+        reasons.append(f"tone невалидный: «{tone}» (ожидается harsh/confused/ironic/calm)")
+
+    if not (item.url or "").strip():
+        reasons.append("у новости нет URL источника")
+
+    return reasons
+
+
+# --- HTML render v2 (Stage 14) -----------------------------------------------
+
+def build_html_v2(payload: dict, item: "NewsItem") -> str:
+    """Stage 14 — компактный формат поста v2 без заголовков-секций.
+
+    {rubric_hashtag}
+
+    {emoji} <b>{specific_title}</b>
+
+    {lead}
+
+    ➤ {fact_1}
+    ➤ {fact_2}
+    ➤ {fact_3}
+
+    🐹 {newbie_voice}
+
+    <a href="{url}">{source_name}</a>
+
+    {hashtags}
+    """
+    sector = item.sector or "other"
+    rubric = SECTOR_RUBRIC.get(sector, "")
+
+    emoji = str(payload.get("title_emoji") or "").strip()
+    if not emoji:
+        emoji = SECTOR_EMOJI_FALLBACK.get(sector, "🗒️")
+
+    specific_title = _e(payload.get("specific_title") or "").strip()
+    title_line = f"{emoji} <b>{specific_title}</b>" if specific_title else neutral_sector_header(sector)
+
+    lead = _e(payload.get("lead") or "").strip()
+
+    facts = _safe_list(payload.get("facts"))[:3]
+
+    newbie_voice = _e(payload.get("newbie_voice") or "").strip()
+
+    source_url = _e(item.url)
+    source_name = _e(item.source)
+
+    parts: list[str] = []
+
+    if rubric:
+        parts.append(rubric)
+        parts.append("")
+
+    parts.append(title_line)
+    parts.append("")
+
+    if lead:
+        parts.append(lead)
+        parts.append("")
+
+    for f in facts:
+        parts.append(f"➤ {_e(f)}")
+
+    if newbie_voice:
+        parts.append("")
+        parts.append(f"🐹 {newbie_voice}")
+
+    if source_url:
+        parts.append("")
+        parts.append(f"<a href=\"{source_url}\">{source_name}</a>")
+
+    tags = merge_hashtags(
+        claude_tags=payload.get("hashtags") or [],
+        sector=sector,
+        assets=item.assets or [],
+    )
+
+    if tags:
+        parts.append("")
+        parts.append(" ".join(tags))
+
+    text = "\n".join(parts).strip()
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text
+
+
+# --- HTML render (legacy v1, renamed) ----------------------------------------
+
+def build_html_legacy(claude_payload: dict, item: "NewsItem", *, compact: bool = False) -> str:
+    """Stage 12b — legacy единый формат поста (v1). Сохранён для обратной совместимости."""
+    return build_html(claude_payload, item, compact=compact)
+
+
+# --- truncate cascade (Stage 14) ----------------------------------------------
+
+def _truncate_post_to_caption_limit(post_html: str, payload: dict, item: "NewsItem") -> str | None:
+    """Stage 14 — каскадное урезание поста до ≤ 1024 chars.
+
+    Возвращает урезанный HTML или None если даже после всех шагов > 1024.
+    Модифицирует копию payload, не трогает оригинал.
+    """
+    if len(post_html) <= PHOTO_CAPTION_HARD_LIMIT:
+        return post_html
+
+    p = dict(payload)  # работаем на копии
+
+    # Step 1: newbie_voice → 1 фраза (≤ 100 chars)
+    nv = str(p.get("newbie_voice") or "")
+    if len(_strip_html_tags(nv)) > 100:
+        p["newbie_voice"] = _truncate_to_sentence(nv, 100)
+        html = build_html_v2(p, item)
+        if len(html) <= PHOTO_CAPTION_HARD_LIMIT:
+            return html
+
+    # Step 2: удаляем 3-й факт
+    facts = list(_safe_list(p.get("facts")))
+    if len(facts) >= 3:
+        p["facts"] = facts[:2]
+        html = build_html_v2(p, item)
+        if len(html) <= PHOTO_CAPTION_HARD_LIMIT:
+            return html
+
+    # Step 3: lead → 1 фраза (≤ 130 chars)
+    lead = str(p.get("lead") or "")
+    if len(_strip_html_tags(lead)) > 130:
+        p["lead"] = _truncate_to_sentence(lead, 130)
+        html = build_html_v2(p, item)
+        if len(html) <= PHOTO_CAPTION_HARD_LIMIT:
+            return html
+
+    # Step 4: удаляем 2-й факт
+    facts = list(_safe_list(p.get("facts")))
+    if len(facts) >= 2:
+        p["facts"] = facts[:1]
+        html = build_html_v2(p, item)
+        if len(html) <= PHOTO_CAPTION_HARD_LIMIT:
+            return html
+
+    # Step 5: всё ещё > 1024 — отдаём None
+    log.warning("truncate cascade exhausted, post still > %d chars", PHOTO_CAPTION_HARD_LIMIT)
+    return None
+
+
+PHOTO_CAPTION_HARD_LIMIT = 1024
+
+
+def final_caption_guard(html: str) -> tuple[bool, str]:
+    """Stage 14 — финальная проверка caption ПЕРЕД send_photo.
+
+    Проверяет ТОЛЬКО caption safety:
+    - len(html) ≤ PHOTO_CAPTION_HARD_LIMIT
+    - простая балансировка тегов <b>, <i>, <a>
+
+    Returns (ok, reason). При ok=True reason пустой.
+    """
+    import re as _re
+    if not isinstance(html, str):
+        return False, "html не строка"
+    if len(html) > PHOTO_CAPTION_HARD_LIMIT:
+        return False, f"caption {len(html)} > {PHOTO_CAPTION_HARD_LIMIT} chars"
+    for tag in ("b", "i"):
+        opens = len(_re.findall(rf"<{tag}>", html))
+        closes = len(_re.findall(rf"</{tag}>", html))
+        if opens != closes:
+            return False, f"broken html: <{tag}> opens={opens} closes={closes}"
+    a_opens = len(_re.findall(r"<a\s+href=", html))
+    a_closes = len(_re.findall(r"</a>", html))
+    if a_opens != a_closes:
+        return False, f"broken html: <a> opens={a_opens} closes={a_closes}"
+    return True, ""
+
+
+# --- HTML render (legacy v1) -------------------------------------------------
 
 def _truncate_to_sentence(text: str, max_chars: int) -> str:
     """Stage 12f compact mode: режет по последней «.», «!» или «?» в пределах max_chars.
@@ -456,32 +831,13 @@ def build_html(claude_payload: dict, item: NewsItem, *, compact: bool = False) -
     return text
 
 
-# --- short caption (для photo с длинным текстом) -----------------------------
-
-TG_CAPTION_LIMIT = 1024
+TG_CAPTION_LIMIT = 1024  # deprecated alias, use PHOTO_CAPTION_HARD_LIMIT
 
 
-def short_caption(claude_payload: dict, item: NewsItem) -> str:
-    """Короткий caption для photo, когда полный текст не влезает в 1024 chars.
-
-    Включает specific_title + 1-2 ключевых факта + хвостик-хэштеги.
-    """
-    title = _e(claude_payload.get("specific_title") or "").strip()
-    if not title:
-        title = neutral_sector_header(item.sector or "other")
-    else:
-        title = f"<b>{title}</b>"
-    brief = _e(claude_payload.get("brief_review") or claude_payload.get("short_summary") or "").strip()
-    parts = [title]
-    if brief:
-        parts.append("")
-        parts.append(brief[:300])
-    parts.append("")
-    parts.append("<i>↓ полный разбор ниже</i>")
-    out = "\n".join(parts).strip()
-    if len(out) > TG_CAPTION_LIMIT - 40:
-        out = out[:TG_CAPTION_LIMIT - 40].rstrip() + "…"
-    return out
+def _strip_html_tags(s: str) -> str:
+    """Грубое снятие HTML-тегов для подсчёта plain-длины."""
+    import re as _re
+    return _re.sub(r"<[^>]+>", "", s or "")
 
 
 # --- NewsPublisher ------------------------------------------------------------
@@ -497,6 +853,9 @@ class NewsPublisher:
         send_fn: SendFn,
         draft_store: Optional[DraftStore] = None,
         preview_send_fn: Optional[PreviewSendFn] = None,
+        news_post_counter: int = 0,
+        counter_get: Optional[Callable[[], int]] = None,
+        counter_inc: Optional[Callable[[], int]] = None,
     ):
         self.cfg = config
         self.dedup = dedup
@@ -505,6 +864,29 @@ class NewsPublisher:
         self.send = send_fn
         self.draft_store = draft_store
         self.preview_send = preview_send_fn
+        # Stage 14: counter может быть либо персистентным (callable из state.json)
+        # либо in-process (legacy). Persisting wins, если оба заданы.
+        self._counter_get = counter_get
+        self._counter_inc = counter_inc
+        self._counter_value = news_post_counter
+
+    def _get_counter(self) -> int:
+        if self._counter_get:
+            try:
+                return int(self._counter_get())
+            except Exception:
+                return self._counter_value
+        return self._counter_value
+
+    def _inc_counter(self) -> int:
+        if self._counter_inc:
+            try:
+                return int(self._counter_inc())
+            except Exception:
+                self._counter_value += 1
+                return self._counter_value
+        self._counter_value += 1
+        return self._counter_value
 
     async def publish(
         self,
@@ -521,12 +903,28 @@ class NewsPublisher:
     ) -> str:
         """Возвращает строку-решение:
         'published_channel' | 'preview_sent' | 'sent_owner' | 'skipped' |
-        'claude_rejected' | 'guard_blocked'.
+        'claude_rejected' | 'guard_blocked' | 'truncation_failed'.
         """
+        use_v2 = self.cfg.news_format_version == "v2"
         short_summary = (claude_payload.get("short_summary") or "").strip()
 
         if not claude_payload.get("should_publish"):
             self.dedup.remember(item, "claude_rejected", short_summary=short_summary)
+            # Stage 14: info DM владельцу без кнопок
+            if self.cfg.news_send_to_owner and self.owner_chat_id:
+                skip_reason = str(claude_payload.get("skip_reason") or claude_payload.get("reason") or "").strip()
+                if not skip_reason:
+                    skip_reason = "(без причины от Claude)"
+                title_short = (item.title or "(no title)")[:80]
+                try:
+                    await self.send(
+                        self.owner_chat_id,
+                        f"🔕 <b>Скипнул новость</b>\n\n"
+                        f"<i>{_e(title_short)}</i>\n\nпричина: {_e(skip_reason)}",
+                        None,
+                    )
+                except Exception as e:
+                    log.warning("should_publish=false info DM failed: %s", e)
             return "claude_rejected"
 
         if item.impact_score < self.cfg.news_min_impact_score:
@@ -537,18 +935,66 @@ class NewsPublisher:
             self.dedup.remember(item, "skipped", short_summary=short_summary)
             return "skipped"
 
-        # Stage 12f — если есть картинка, рендерим compact, чтобы вместе с фото
-        # умещалось в Telegram caption ≤ 1024 chars (одно сообщение в канале).
-        text = build_html(claude_payload, item, compact=bool(image_path))
+        # Build post HTML — v2 compact format, v1 может быть compact или full
+        if use_v2:
+            guard_reasons = validate_payload_v2(claude_payload, item)
+            normalized_payload = normalize_payload_v2(claude_payload, item)
+            text = build_html_v2(normalized_payload, item)
+        else:
+            text = build_html_legacy(claude_payload, item, compact=bool(image_path))
+            guard_reasons = validate_payload_for_publish(claude_payload, item)
+            normalized_payload = claude_payload
 
-        # Stage 12b publish-guard. Применяем до решения о канале — если payload
-        # дырявый (нет specific_title / generic / нет фактов), уходит на ревью
-        # владельцу с алертом, никогда не в канал.
-        guard_reasons = validate_payload_for_publish(claude_payload, item)
+        # Stage 14 — truncate cascade для v2
+        if use_v2:
+            truncated = _truncate_post_to_caption_limit(text, normalized_payload, item)
+            if truncated is None:
+                # Слишком плотная новость — алерт владельцу, в канал не публикуем
+                log.warning(
+                    "news truncation failed for %r — post too dense even after cascade",
+                    item.title[:80],
+                )
+                if self.cfg.news_send_to_owner and self.owner_chat_id:
+                    try:
+                        await self.send(
+                            self.owner_chat_id,
+                            f"⚠️ <b>Новость слишком плотная для одного поста — посмотри текст</b>\n\n"
+                            f"<i>{_e(item.title[:200])}</i>\n\n"
+                            f"url: {_e(item.url)}\n"
+                            f"sector: {_e(item.sector or '-')} | impact: {int(item.impact_score)}",
+                            None,
+                        )
+                    except Exception:
+                        pass
+                self.dedup.remember(item, "skipped", short_summary="truncation failed")
+                return "skipped"
+            text = truncated
+            ok, reason = final_caption_guard(text)
+            if not ok:
+                log.error("final_caption_guard failed for %r: %s", item.title[:80], reason)
+                if self.cfg.news_send_to_owner and self.owner_chat_id:
+                    try:
+                        await self.send(
+                            self.owner_chat_id,
+                            f"⚠️ <b>Caption guard заблокировал публикацию</b>\n\n"
+                            f"<i>{_e(item.title[:200])}</i>\n\nпричина: {_e(reason)}",
+                            None,
+                        )
+                    except Exception:
+                        pass
+                self.dedup.remember(item, "skipped", short_summary=f"caption guard: {reason}")
+                return "skipped"
 
+        # Авто-публикация по impact: если NEWS_AUTO_PUBLISH_MIN_IMPACT>0
+        # и item.impact_score >= порога, обходим ручное NEWS_PUBLISH_TO_CHANNEL.
+        auto_publish_threshold = self.cfg.news_auto_publish_min_impact
+        impact_bypass = (
+            auto_publish_threshold > 0
+            and item.impact_score >= auto_publish_threshold
+        )
         channel_allowed = (
             self.cfg.enable_news
-            and self.cfg.news_publish_to_channel
+            and (self.cfg.news_publish_to_channel or impact_bypass)
             and not self.cfg.news_dry_run
             and self.channel_id
             and not guard_reasons
@@ -562,11 +1008,10 @@ class NewsPublisher:
         if channel_allowed:
             await self.send(self.channel_id, text, image_path)
             self.dedup.remember(item, "published_channel", short_summary=short_summary)
+            self._inc_counter()
             return "published_channel"
 
-        # Stage 12g — лимит ревью в день. Считаем все non-skipped события за сегодня
-        # (pending_review, sent_owner, published_channel) — если уже больше квоты,
-        # не шлём владельцу новые превью, чтобы не заваливать DM.
+        # Stage 12g — лимит ревью в день.
         review_quota = getattr(self.cfg, "news_max_reviews_per_day", 0) or 0
         if review_quota > 0:
             today_total = self.dedup.posted_today(only_channel=False)
@@ -595,10 +1040,20 @@ class NewsPublisher:
                 image_prompt=image_prompt,
                 image_model=image_model,
                 image_created_at=image_created_at,
+                schema_version="v2" if use_v2 else "v1",
             )
             self.draft_store.add(draft)
-            preview = self._wrap_preview(text, draft.draft_id, item, guard_reasons)
-            await self.preview_send(preview, review_keyboard(draft.draft_id), image_path)
+            # Stage 14 — превью без _wrap_preview: 2 мини-сообщения + пост
+            # передаются через preview_send с meta
+            tone = claude_payload.get("tone", "calm")
+            meta = {
+                "draft_id": draft.draft_id,
+                "sector": item.sector or "other",
+                "impact": int(item.impact_score),
+                "tone": tone,
+                "guard_reasons": guard_reasons,
+            }
+            await self.preview_send(text, review_keyboard(draft.draft_id), image_path, meta)
             self.dedup.remember(item, "pending_review", short_summary=short_summary)
             return "preview_sent"
 
@@ -610,21 +1065,3 @@ class NewsPublisher:
 
         self.dedup.remember(item, "skipped", short_summary=short_summary)
         return "skipped"
-
-    @staticmethod
-    def _wrap_preview(post_text: str, draft_id: str, item: NewsItem, guard_reasons: list[str]) -> str:
-        sector = html.escape(item.sector or "-", quote=False)
-        impact = int(item.impact_score)
-        head_lines = [
-            "🧪 <b>Превью новостного поста — нужен ревью</b>",
-            f"draft_id: <code>{html.escape(draft_id, quote=False)}</code> | "
-            f"sector: {sector} | impact: {impact}",
-        ]
-        if guard_reasons:
-            head_lines.append("")
-            head_lines.append("🚫 <b>Publish-guard заблокировал автопубликацию:</b>")
-            for r in guard_reasons[:6]:
-                head_lines.append(f"• {html.escape(r, quote=False)}")
-            head_lines.append("Поправь правкой ✏️ или перегенерь 🔁 перед ✅.")
-        head_lines.append("──────────────")
-        return "\n".join(head_lines) + "\n\n" + post_text

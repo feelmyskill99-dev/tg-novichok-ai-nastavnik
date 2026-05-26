@@ -12,6 +12,9 @@ openai
 apscheduler
 fastapi
 uvicorn[standard]
+python-multipart
+portalocker
+pytest-asyncio
 moviepy
 pillow
 tzdata

@@ -483,8 +483,9 @@ Claude должен возвращать:
 - glossary;
 - scam_radar;
 - political_market_noise;
-- weekly_report;
-- Gate.io tutorial.
+- weekly_diary (итоги недели от лица новичка, вс 19:00 МСК через review).
+
+Партнёрка Gate.io — не отдельный тип постов, а нативная вставка в обычные посты (см. §🔗).
 
 ---
 
@@ -502,7 +503,7 @@ Claude должен возвращать:
 - новости — только если impact_score высокий;
 - author_note — 1–2 раза в неделю;
 - scam_radar — 1–2 раза в неделю;
-- weekly_report — 1 раз в неделю;
+- weekly_diary — воскресенье 19:00 МСК, через review владельцу (✅/✏️/❌); агрегирует посты недели из history.json, без выдуманных цифр;
 - trade updates — только если разрешено и прошло ревью.
 
 ---

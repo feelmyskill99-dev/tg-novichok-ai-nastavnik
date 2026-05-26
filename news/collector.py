@@ -22,10 +22,26 @@ log = logging.getLogger("news.collector")
 
 
 RSS_FEEDS = {
+    # Базовые крипто-ленты
     "CoinDesk":      "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "Cointelegraph": "https://cointelegraph.com/rss",
     "Decrypt":       "https://decrypt.co/feed",
     "The Block":     "https://www.theblock.co/rss.xml",
+
+    # Геополитика → крипта (Google News с тематическим query)
+    # Sector-detection (scorer.py) разложит их по `political_market_noise` /
+    # `macro` / `regulation_etf_institutional`. Если в новости нет крипто-релевантности —
+    # impact будет низкий и она отфильтруется через news_min_impact_score.
+    "GNews · Trump crypto":
+        "https://news.google.com/rss/search?q=%22Trump%22+(crypto+OR+bitcoin+OR+stablecoin)&hl=en-US&gl=US&ceid=US:en",
+    "GNews · Trump family business":
+        "https://news.google.com/rss/search?q=(%22Eric+Trump%22+OR+%22Donald+Trump+Jr%22+OR+%22Jared+Kushner%22+OR+%22World+Liberty+Financial%22)+(crypto+OR+bitcoin)&hl=en-US&gl=US&ceid=US:en",
+    "GNews · Iran sanctions crypto":
+        "https://news.google.com/rss/search?q=(Iran+OR+Israel)+(sanctions+OR+oil+OR+strike)+(crypto+OR+bitcoin+OR+stablecoin+OR+markets)&hl=en-US&gl=US&ceid=US:en",
+    "GNews · Middle East crypto":
+        "https://news.google.com/rss/search?q=(%22Middle+East%22+OR+%22Saudi+Arabia%22+OR+UAE+OR+%22sovereign+wealth%22)+(crypto+OR+bitcoin+OR+stablecoin+OR+tokenization)&hl=en-US&gl=US&ceid=US:en",
+    "GNews · US executive orders crypto":
+        "https://news.google.com/rss/search?q=(%22executive+order%22+OR+%22White+House%22)+(crypto+OR+bitcoin+OR+stablecoin+OR+digital+asset)&hl=en-US&gl=US&ceid=US:en",
 }
 
 HTTP_TIMEOUT = 15.0
@@ -58,7 +74,13 @@ class NewsCollector:
         out: list[NewsItem] = []
         for source, url in RSS_FEEDS.items():
             try:
-                parsed = await asyncio.to_thread(feedparser.parse, url)
+                # Этап 1.6: качаем через httpx с таймаутом, feedparser
+                # парсит уже готовые bytes — не уходит в сеть сам.
+                async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+                    r = await client.get(url, headers={"User-Agent": "ai-deposit-bot/1.0"})
+                    r.raise_for_status()
+                    raw = r.content
+                parsed = await asyncio.to_thread(feedparser.parse, raw)
             except Exception as e:
                 log.warning("RSS %s failed: %s", source, e)
                 continue

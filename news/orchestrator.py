@@ -55,6 +55,8 @@ async def run_news_now(
     drafts_path: Optional[Path] = None,
     preview_send_fn: Optional[PreviewSendFn] = None,
     image_provider: Optional[ImageProvider] = None,
+    counter_get: Optional[Callable[[], int]] = None,
+    counter_inc: Optional[Callable[[], int]] = None,
 ) -> dict:
     """Полный пайплайн: collect → score → dedup → Claude → publish.
 
@@ -111,10 +113,29 @@ async def run_news_now(
             previous_phrases = get_recent_published_phrases(DraftStore(drafts_path), limit=8)
         except Exception as e:
             log.warning("get_recent_published_phrases failed: %s", e)
+    # Stage 14 — mistake_theme inject каждый 5-й опубликованный пост.
+    mistake_hint: Optional[dict] = None
+    if counter_get is not None:
+        try:
+            current_counter = int(counter_get())
+        except Exception:
+            current_counter = 0
+        next_post_number = current_counter + 1
+        if next_post_number % 5 == 0:
+            try:
+                from .publisher import inject_mistake_theme
+                # inject_mistake_theme модифицирует payload; здесь нам нужен только hint.
+                # Соберём через временный dict.
+                tmp = {}
+                inject_mistake_theme(tmp, counter=current_counter)
+                mistake_hint = tmp.get("mistake_theme_hint")
+            except Exception as e:
+                log.warning("mistake_theme inject failed: %s", e)
     payload = analyzer.analyze(
         top,
         market_snapshot=market_snapshot,
         previous_phrases_to_avoid=previous_phrases,
+        mistake_theme_hint=mistake_hint,
     )
 
     if not payload.get("should_publish"):
@@ -201,6 +222,8 @@ async def run_news_now(
         send_fn=send_fn,
         draft_store=draft_store,
         preview_send_fn=preview_send_fn,
+        counter_get=counter_get,
+        counter_inc=counter_inc,
     )
     decision = await publisher.publish(
         payload, chosen,

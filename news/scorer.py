@@ -79,6 +79,18 @@ SECTOR_KEYWORDS: dict[str, list[str]] = {
         r"executive order", r"government shutdown", r"\bgeopolitic",
         r"tariff", r"central bank", r"\becb\b",
         r"sec chair", r"cftc chair", r"treasury secretar",
+        # Trump family / business circle (часто двигает крипто-рынок через анонсы)
+        r"eric trump", r"donald trump jr", r"trump jr", r"melania trump",
+        r"ivanka trump", r"jared kushner", r"world liberty financial",
+        r"\bwlfi\b", r"trump media",
+        # Middle East / геополитические триггеры с рыночным эффектом
+        r"\biran\b", r"\bisrael\b", r"\bhamas\b", r"\bhezbollah\b",
+        r"\byemen\b", r"houthi", r"middle east", r"persian gulf",
+        r"saudi arabia", r"saudi sovereign", r"\buae\b", r"abu dhabi",
+        r"qatar", r"strait of hormuz",
+        r"oil (price|spike|surge|shock)", r"crude oil",
+        r"missile (strike|attack)", r"airstrike", r"drone strike",
+        r"escalation", r"war (in|with)", r"ceasefire",
     ],
     "ai_crypto": [
         r"\bai agent", r"ai agents", r"ai wallet",
@@ -181,10 +193,18 @@ SECTOR_HIGH_IMPACT: dict[str, list[str]] = {
         r"\bcpi\b", r"\bfed\b", r"\bfomc\b", r"rate cut", r"rate hike",
         r"liquidity shock",
     ],
-    # Stage 9
+    # Stage 9 + 2026-05-26: расширение под Middle East / Trump family
     "political_market_noise": [
         r"sanction", r"executive order", r"\betf\b", r"\bsec\b", r"\bmica\b",
         r"central bank", r"crypto regulation", r"stablecoin regulation",
+        # Геополитика с прямым рыночным эффектом (oil → risk-off → BTC реагирует)
+        r"missile (strike|attack)", r"airstrike", r"drone strike",
+        r"oil (price|spike|surge|shock)", r"strait of hormuz",
+        r"war (in|with) (iran|israel|ukraine|russia)",
+        r"ceasefire (deal|agreement|signed)",
+        # Trump family — анонсы про крипту (Trump Media, WLFI, мемкойн TRUMP)
+        r"trump media", r"world liberty financial", r"\bwlfi\b",
+        r"(eric|donald) trump.*(crypto|bitcoin|stablecoin|token)",
     ],
     "scam_radar": [
         r"wallet drainer", r"phishing campaign", r"approval drainer",

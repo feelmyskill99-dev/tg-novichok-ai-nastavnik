@@ -8,27 +8,24 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from core.env_helpers import env_bool, env_int, env_float, env_str
 
+
+# Этап 2.3: алиасы для backwards compat внутри этого модуля.
 def _bool(name: str, default: bool) -> bool:
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    return env_bool(name, default=default)
 
 
 def _int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+    return env_int(name, default=default)
 
 
 def _float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+    return env_float(name, default=default)
 
 
 def _str(name: str, default: str) -> str:
-    return os.getenv(name, default).strip()
+    return env_str(name, default=default)
 
 
 TRADE_PUBLISH_MODES = (

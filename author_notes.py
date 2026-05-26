@@ -26,6 +26,8 @@ from typing import Awaitable, Callable, Optional
 
 from anthropic import Anthropic
 
+from core.json_store import load_json, save_json
+
 try:
     from style_guides import compose_style_context as _compose_style
 except Exception:   # pragma: no cover
@@ -43,17 +45,16 @@ SHORT_DISCLAIMER = "Не финсовет. Это дневник обучени�
 # CONFIG
 # =============================================================================
 
+from core.env_helpers import env_bool as _env_bool, env_int as _env_int
+
+
+# Этап 2.3: алиасы; реальная логика в core/env_helpers.
 def _bool(name: str, default: bool) -> bool:
-    import os
-    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+    return _env_bool(name, default=default)
 
 
 def _int(name: str, default: int) -> int:
-    import os
-    try:
-        return int(os.getenv(name, str(default)))
-    except ValueError:
-        return default
+    return _env_int(name, default=default)
 
 
 @dataclass(frozen=True)
@@ -381,21 +382,10 @@ class AuthorNoteStore:
         self.path = path
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, list) else []
-        except Exception as e:
-            log.warning("author_notes_drafts.json повреждён: %s", e)
-            return []
+        return load_json(self.path, default=[], expected_type=list)
 
     def _save(self, records: list[dict]) -> None:
-        records = records[-MAX_DRAFTS:]
-        self.path.write_text(
-            json.dumps(records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        save_json(self.path, records[-MAX_DRAFTS:])
 
     def list_all(self) -> list[AuthorNoteDraft]:
         return [AuthorNoteDraft.from_dict(d) for d in self._load()]

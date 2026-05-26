@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import admin_panel
 import os
 import sys
 import json
@@ -20,7 +21,7 @@ import asyncio
 import logging
 import argparse
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -64,8 +65,58 @@ import uvicorn
 
 from core.safety import Sentinel
 from core.styleguard import StyleGuard
-
+from core.mistake_tracker import MistakeTracker
+from core.json_store import load_json, save_json, update_json
+from core.publish_lock import try_claim_for_publishing, release_claim
+from core.telegram_send import split_html_for_telegram
+from core.content_mix import (
+    CATEGORY_MAP as _CM_CATEGORY_MAP,
+    CONTENT_MIX_CHANNEL_MODE_MIN as _CM_CHANNEL_MODE_MIN,
+    CONTENT_MIX_FALLBACK_RECOMMEND as _CM_FALLBACK,
+    CONTENT_MIX_LOG_CAP as _CM_LOG_CAP,
+    CONTENT_MIX_LOW_DATA_THRESHOLD as _CM_LOW_DATA,
+    CONTENT_MIX_OVERREP_DELTA as _CM_OVER_DELTA,
+    CONTENT_MIX_TARGET as _CM_TARGET,
+    CONTENT_MIX_UNDERREP_DELTA as _CM_UNDER_DELTA,
+    CONTENT_MIX_WINDOW_DAYS as _CM_WINDOW_DAYS,
+    category_for as _cm_category_for,
+    compute_mix as _cm_compute_mix,
+)
+from core.content_mix_writer import (
+    append_event as _cmw_append_event,
+    make_event as _cmw_make_event,
+    migrate_state as _cmw_migrate_state,
+)
+from core.post_tags import merge_tags as _merge_post_tags
+from core.html_safe import escape_html as _escape_html
+from core.partner_link import build_partner_url as _partner_url
+from core.trade_state import (
+    get_gate_screenshot as _ts_get_gate_screenshot,
+    get_trade_channel_posts_today as _ts_get_trade_posts,
+    increment_trade_channel_posts_today as _ts_inc_trade_posts,
+    lookup_trade_by_message as _ts_lookup_trade_by_msg,
+    remember_trade_message as _ts_remember_trade_msg,
+    set_gate_screenshot as _ts_set_gate_screenshot,
+    set_last_trade_scan_at as _ts_set_scan_at,
+    set_last_trade_tick_at as _ts_set_tick_at,
+    today_utc_iso as _ts_today_utc_iso,
+)
+from core.draft_state import (
+    get_author_notes_week_count as _ds_get_author_week_count,
+    get_awaiting_edit as _ds_get_awaiting_edit,
+    get_news_post_counter as _ds_get_news_counter,
+    increment_author_notes_week_count as _ds_inc_author_week,
+    increment_news_post_counter as _ds_inc_news_counter,
+    set_awaiting_edit as _ds_set_awaiting_edit,
+)
+from core.image_intent import (
+    looks_like_ai_image_request as _ii_ai_request,
+    looks_like_image_request as _ii_any_request,
+    looks_like_source_image_request as _ii_source_request,
+)
+from core.log_dump import safe_log_dict as _ld_safe_log_dict
 styleguard: Optional[StyleGuard] = None
+mistake_tracker: Optional[MistakeTracker] = None
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -82,6 +133,8 @@ NEWS_HISTORY_FILE = ROOT / "news_history.json"
 NEWS_DRAFTS_FILE = ROOT / "news_drafts.json"
 # Stage 10
 AUTHOR_NOTES_FILE = ROOT / "author_notes_drafts.json"
+# Stage 13 — weekly diary
+WEEKLY_DIARY_FILE = ROOT / "weekly_diary_drafts.json"
 # Stage 8a — confirm/live storage
 CONFIRM_TRADES_FILE = ROOT / "confirm_trades.json"
 LIVE_TRADES_FILE = ROOT / "live_trades.json"
@@ -149,12 +202,7 @@ POST_EVENING_HOUR  = _env_int("POST_EVENING_HOUR", 19)
 if not CHANNEL_ID and not DRY_RUN:
     DRY_RUN = True
 
-DISCLAIMER = (
-    "Не является финансовым советом. Это личный дневник обучения, "
-    "а AI-анализ носит ознакомительный характер."
-)
-# Stage 9: короткий дисклеймер для обычных постов (длинный — только в закрепе и больших гайдах).
-DISCLAIMER_SHORT = "Не финсовет. Это дневник обучения и AI-разбор."
+from core.disclaimer import DISCLAIMER_LONG as DISCLAIMER, pick_disclaimer
 
 FALLBACK_TOPICS = [
     "риск-менеджмент: почему 95% новичков сливают в первые месяцы",
@@ -184,6 +232,7 @@ log = logging.getLogger("bot")
 # с ротацией (5 файлов по 2 MB).
 try:
     from logging.handlers import RotatingFileHandler
+    from core.log_redact import RedactFilter
     _log_file = OUTPUTS / "scheduler.log"
     _file_handler = RotatingFileHandler(
         str(_log_file), maxBytes=2_000_000, backupCount=5, encoding="utf-8"
@@ -191,7 +240,13 @@ try:
     _file_handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)s %(name)s — %(message)s"
     ))
+    # Этап 1.7: redact-фильтр на root-уровне — покрывает все handlers.
+    _redact = RedactFilter()
+    logging.getLogger().addFilter(_redact)
+    for _h in logging.getLogger().handlers:
+        _h.addFilter(_redact)
     logging.getLogger().addHandler(_file_handler)
+    _file_handler.addFilter(_redact)
     log.info("file logging → %s", _log_file)
 except Exception as _e:  # pragma: no cover — лог-файл не должен блокировать запуск
     log.warning("file logging setup failed: %s", _e)
@@ -200,42 +255,19 @@ except Exception as _e:  # pragma: no cover — лог-файл не долже�
 # STATE & HISTORY
 # =============================================================================
 
+_STATE_DEFAULT = {"post_count": 0, "last_image_at": 0, "last_partner_at": 0}
+
+
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-            log.warning("state.json: ожидался object, получен %s — backup и сброс", type(data).__name__)
-        except Exception as e:
-            log.warning("state.json повреждён (%s) — backup и сброс", e)
-        # повреждён → backup state.corrupt.<ts>.json и возвращаем дефолт
-        try:
-            ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            backup_path = STATE_FILE.with_name(f"state.corrupt.{ts}.json")
-            backup_path.write_bytes(STATE_FILE.read_bytes())
-            log.warning("state.json corruption backup → %s", backup_path)
-        except Exception as e2:
-            log.warning("state.json: backup не удался: %s", e2)
-    return {"post_count": 0, "last_image_at": 0, "last_partner_at": 0}
+    return load_json(STATE_FILE, default=dict(_STATE_DEFAULT), expected_type=dict)
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    save_json(STATE_FILE, state)
 
 
 def load_history() -> list:
-    if HISTORY_FILE.exists():
-        try:
-            data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
-        except Exception:
-            log.warning("history.json повреждён, сбрасываю")
-    return []
+    return load_json(HISTORY_FILE, default=[], expected_type=list)
 
 
 # =============================================================================
@@ -252,99 +284,24 @@ def load_history() -> list:
 #   - иначе → используем все события (owner+channel) — чтобы статистика не была пустой
 #     в DRY_RUN/preview-режиме.
 
-CONTENT_MIX_TARGET: dict[str, float] = {
-    "market_chart": 0.40,
-    "education":    0.20,
-    "news":         0.15,
-    "author_note":  0.15,
-    "trade_diary":  0.10,
-}
-CONTENT_MIX_WINDOW_DAYS = 7
-CONTENT_MIX_LOG_CAP = 500
-CONTENT_MIX_OVERREP_DELTA = 0.10
-CONTENT_MIX_UNDERREP_DELTA = 0.07
-CONTENT_MIX_CHANNEL_MODE_MIN = 3
-CONTENT_MIX_LOW_DATA_THRESHOLD = 3
-CONTENT_MIX_FALLBACK_RECOMMEND = "education"
+# Этап 2.2: константы и CATEGORY_MAP теперь в core/content_mix.py — алиасы
+# для существующего кода bot.py (compute_content_mix, _content_mix_hint_block).
+CONTENT_MIX_TARGET = _CM_TARGET
+CONTENT_MIX_WINDOW_DAYS = _CM_WINDOW_DAYS
+CONTENT_MIX_LOG_CAP = _CM_LOG_CAP
+CONTENT_MIX_OVERREP_DELTA = _CM_OVER_DELTA
+CONTENT_MIX_UNDERREP_DELTA = _CM_UNDER_DELTA
+CONTENT_MIX_CHANNEL_MODE_MIN = _CM_CHANNEL_MODE_MIN
+CONTENT_MIX_LOW_DATA_THRESHOLD = _CM_LOW_DATA
+CONTENT_MIX_FALLBACK_RECOMMEND = _CM_FALLBACK
+CATEGORY_MAP = _CM_CATEGORY_MAP
 
-# raw post_type → canonical category. Свёрнутые синонимы из всех модулей проекта.
-CATEGORY_MAP: dict[str, str] = {
-    # market_chart
-    "market":           "market_chart",
-    "btc_overview":     "market_chart",
-    "chart_analysis":   "market_chart",
-    "flash":            "market_chart",
-    # education
-    "education":            "education",
-    "fallback_education":   "education",
-    "glossary":             "education",
-    "term_without_pain":    "education",
-    "anti_signal":          "education",
-    "risk_management":      "education",
-    # news (включая sector-уровень из news/)
-    "news":                       "news",
-    "news_analysis":              "news",
-    "ai_crypto":                  "news",
-    "political_market_noise":     "news",
-    "scam_radar":                 "news",
-    "security_news":              "news",
-    "security_hacks_scams":       "news",
-    "stablecoins":                "news",
-    "rwa":                        "news",
-    "rwa_tokenization":           "news",
-    "depin":                      "news",
-    "depin_infrastructure":       "news",
-    "regulation_etf_institutional": "news",
-    "macro":                      "news",
-    "memecoins_low_priority":     "news",
-    # author_note
-    "author_note":      "author_note",
-    "personal_note":    "author_note",
-    "what_i_learned":   "author_note",
-    "hamster_dialogue": "author_note",
-    # trade_diary
-    "trade":                "trade_diary",
-    "paper_trade":          "trade_diary",
-    "trade_review":         "trade_diary",
-    "closed_trade":         "trade_diary",
-    "weekly_trade_report":  "trade_diary",
-}
-
-
-def _category_for(post_type: str) -> str:
-    return CATEGORY_MAP.get((post_type or "").lower().strip(), "other")
+_category_for = _cm_category_for
 
 
 def _migrate_content_mix_state_if_needed(s: dict) -> bool:
-    """Мягкая миграция: если есть старая плоская структура state.posts_log
-    ([{type, ts}]) — переносим в state.content_mix_log с full schema.
-    Возвращает True если состояние было изменено."""
-    if "content_mix_log" in s and isinstance(s["content_mix_log"], list):
-        return False
-    legacy = s.get("posts_log")
-    if isinstance(legacy, list) and legacy:
-        migrated = []
-        for rec in legacy:
-            if not isinstance(rec, dict):
-                continue
-            old_type = rec.get("type") or ""
-            ts = rec.get("ts") or datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
-            migrated.append({
-                "timestamp": ts,
-                "post_type": old_type,
-                "category": _category_for(old_type),
-                "published_to": "channel",   # старая логика логировала только channel
-                "title": "",
-                "source": "legacy",
-            })
-        s["content_mix_log"] = migrated
-        s.pop("posts_log", None)
-        log.info("content_mix: мигрировано %d записей из posts_log → content_mix_log", len(migrated))
-        return True
-    if "content_mix_log" not in s:
-        s["content_mix_log"] = []
-        return True
-    return False
+    """Backwards-compat обёртка над core.content_mix_writer.migrate_state."""
+    return _cmw_migrate_state(s)
 
 
 def _log_post_event(
@@ -363,118 +320,19 @@ def _log_post_event(
         log.warning("content_mix: bad published_to=%r, skip", published_to)
         return
     s = load_state()
-    _migrate_content_mix_state_if_needed(s)
-    log_list = s.get("content_mix_log") or []
-    if not isinstance(log_list, list):
-        log_list = []
-    log_list.append({
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
-        "post_type": post_type or "",
-        "category": _category_for(post_type),
-        "published_to": published_to,
-        "title": (title or "")[:240],
-        "source": source or "",
-    })
-    # rolling-cleanup: держим окно 14 дней + cap (на случай долгих DRY-режимов)
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=14)
-    fresh: list[dict] = []
-    for ev in log_list:
-        try:
-            ts = datetime.fromisoformat(ev.get("timestamp") or "")
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= cutoff:
-                fresh.append(ev)
-        except Exception:
-            continue
-    s["content_mix_log"] = fresh[-CONTENT_MIX_LOG_CAP:]
+    event = _cmw_make_event(
+        post_type, published_to=published_to, title=title, source=source,
+    )
+    _cmw_append_event(s, event)
     save_state(s)
 
 
 def compute_content_mix() -> dict:
-    """7-дневная статистика. Подбирает mode=channel если есть >=3 channel-событий,
-    иначе mode=all. Возвращает counts/shares/over/under/recommended/reason.
-    """
+    """7-дневная статистика. Делегирует в core.content_mix.compute_mix."""
     s = load_state()
     _migrate_content_mix_state_if_needed(s)
     save_state(s)
-    log_list = s.get("content_mix_log") or []
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=CONTENT_MIX_WINDOW_DAYS)
-
-    fresh: list[dict] = []
-    for ev in log_list:
-        try:
-            ts = datetime.fromisoformat(ev.get("timestamp") or "")
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if ts >= cutoff:
-                fresh.append(ev)
-        except Exception:
-            continue
-
-    channel_only = [e for e in fresh if e.get("published_to") == "channel"]
-    if len(channel_only) >= CONTENT_MIX_CHANNEL_MODE_MIN:
-        events = channel_only
-        mode = "channel"
-    else:
-        events = fresh
-        mode = "all"
-
-    counts: dict[str, int] = {c: 0 for c in CONTENT_MIX_TARGET}
-    other_count = 0
-    for e in events:
-        cat = e.get("category") or "other"
-        if cat in counts:
-            counts[cat] += 1
-        else:
-            other_count += 1
-    target_total = sum(counts.values())   # other не входит в распределение
-    total = target_total + other_count
-
-    shares = {c: (counts[c] / target_total) if target_total > 0 else 0.0 for c in counts}
-
-    over = [c for c in CONTENT_MIX_TARGET
-            if shares[c] > CONTENT_MIX_TARGET[c] + CONTENT_MIX_OVERREP_DELTA]
-    under = [c for c in CONTENT_MIX_TARGET
-             if shares[c] < CONTENT_MIX_TARGET[c] - CONTENT_MIX_UNDERREP_DELTA]
-
-    if total < CONTENT_MIX_LOW_DATA_THRESHOLD:
-        recommended = CONTENT_MIX_FALLBACK_RECOMMEND
-        reason = (f"мало данных ({total} событий за {CONTENT_MIX_WINDOW_DAYS}д) "
-                  f"— fallback на «{CONTENT_MIX_FALLBACK_RECOMMEND}», чтобы канал не был сухим")
-    elif under:
-        worst = sorted(under, key=lambda c: shares[c] - CONTENT_MIX_TARGET[c])[0]
-        recommended = worst
-        deficit = (CONTENT_MIX_TARGET[worst] - shares[worst]) * 100
-        reason = (f"{worst} = {round(shares[worst]*100)}% (цель {round(CONTENT_MIX_TARGET[worst]*100)}%), "
-                  f"дефицит {round(deficit)} п.п.")
-    elif over:
-        # все категории не «underrepresented», но есть «overrepresented» — значит, остальные
-        # либо в норме, либо чуть-чуть недотягивают; рекомендуем не повторять перекос.
-        # Берём категорию с минимальной долей не из over.
-        candidates = [c for c in CONTENT_MIX_TARGET if c not in over]
-        if candidates:
-            recommended = min(candidates, key=lambda c: shares[c] - CONTENT_MIX_TARGET[c])
-        else:
-            recommended = CONTENT_MIX_FALLBACK_RECOMMEND
-        reason = ("есть перекос (" + ", ".join(over) + ") — рекомендуем не повторять, "
-                  f"следующий лучше «{recommended}»")
-    else:
-        recommended = "market_chart"
-        reason = "все категории в пределах коридора — можно обычный рыночный пост"
-
-    return {
-        "mode": mode,
-        "total_posts": total,
-        "counts": counts,
-        "other_count": other_count,
-        "shares": shares,
-        "target": dict(CONTENT_MIX_TARGET),
-        "overrepresented": over,
-        "underrepresented": under,
-        "recommended": recommended,
-        "reason": reason,
-    }
+    return _cm_compute_mix(s.get("content_mix_log") or [])
 
 
 def _content_mix_hint_block(*, allow: bool = True) -> str | None:
@@ -508,13 +366,11 @@ def _content_mix_hint_block(*, allow: bool = True) -> str | None:
 
 
 def append_history(entry: dict, limit: int = HISTORY_LIMIT) -> None:
-    history = load_history()
-    history.append(entry)
-    history = history[-limit:]
-    HISTORY_FILE.write_text(
-        json.dumps(history, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    def _mut(history: list) -> list:
+        history.append(entry)
+        return history[-limit:]
+
+    update_json(HISTORY_FILE, default=[], expected_type=list, mutator=_mut)
 
 
 # =============================================================================
@@ -906,19 +762,41 @@ CLAUDE_SYSTEM = f"""
 - fallback_education — рыночные данные недоступны; пишем по теме market_snapshot.fallback_topic
                        БЕЗ конкретных цифр и цен
 
-ДЛИНА (важно — Telegram читают с телефона):
-- обычный/новостной пост: 900–1300 символов
-- обучающий (fallback_education): 1200–1800 символов
-- абзац максимум 1–3 строки
+ДЛИНА (важно — Telegram caption-лимит фото 1024 символа, всё должно влезть в одно сообщение photo+caption):
+- обычный/новостной/flash пост: 700–880 символов СУММАРНО по полям
+  human_part + hamster_part + mentor_part + beginner_mistake + lesson + question
+  (партнёрка и хэштеги добавляются автоматически уже после).
+- обучающий (fallback_education): 700–900 символов суммарно — те же поля.
+- абзац максимум 1–3 строки. Без длинных стен текста.
+- mentor_part: 2–3 КОРОТКИХ абзаца, не больше. Каждая мысль ≤2 фраз.
 
 СТРУКТУРА (мини-сцена):
 1) human_part — живой хук + что увидел/почувствовал новичок (2–4 короткие фразы)
 2) hamster_part — короткая эмоциональная реакция «внутреннего хомяка» в кавычках
                   (используй ~50% постов; null если не уместно — например, в обучающем без эмоций)
 3) mentor_part — AI-наставник спокойно, строго и слегка саркастично возвращает на землю
-                 (3–5 коротких абзацев / маркеры — по смыслу)
+                 (2–3 коротких абзаца — по смыслу; не больше)
 4) beginner_mistake — ОДНА конкретная ошибка новичка, которую этот пост предотвращает (1 фраза)
 5) lesson — короткий вывод 1–2 предложения, без призыва к действию
+
+ВАРИАЦИЯ СТРУКТУРЫ (важно — иначе посты выглядят как штамповка):
+- НЕ КАЖДЫЙ пост обязан иметь все 5 блоков. Канал должен звучать как живой человек,
+  а не как Python-шаблон с одинаковыми секциями.
+- Иногда (≈1 из 4 постов) делай КОРОТКУЮ заметку: только human_part (250-400 символов суммарно),
+  а hamster_part / mentor_part / beginner_mistake / lesson верни null. Это даёт каналу «дыхание».
+- Иногда меняй порядок мысли: пусть mentor_part звучит ДО hamster_part по смыслу — то есть
+  AI первым реагирует, а хомяк уже в кавычках возражает. (Технически порядок блоков фиксирован
+  Python-сборщиком; ты управляешь только тем, ЧТО говорит каждый персонаж.)
+- Реально проверяй: если рынок ровный и говорить нечего — короткая заметка лучше, чем
+  выдавленные 4 секции «по форме».
+
+МЕТРИКИ (RSI / EMA / фандинг / open_interest) — ИСПОЛЬЗУЙ СДЕРЖАННО:
+- Упоминай число только если оно существенно для сегодняшнего наблюдения.
+- Если рынок ровный / неопределённый — пиши про наблюдение и решение, а не про цифры.
+- Можно вообще обойтись без чисел в тексте, если они не двигают вывод. market_snapshot
+  ты ВИДИШЬ, но из этого не следует, что зритель тоже хочет видеть RSI каждый день.
+- Плохо: «RSI 52, EMA50/200 рядом — нейтральный контекст.»
+  Хорошо: «Рынок просто стоит. Никакого повода входить — и никакого повода паниковать.»
 
 Если need_question=true — добавь поле question (один короткий вопрос аудитории).
 Если нет — question=null.
@@ -1024,7 +902,8 @@ def generate_image(openai_client: OpenAI, prompt: str, out_path: Path) -> Path |
 # =============================================================================
 
 def esc(s) -> str:
-    return html.escape("" if s is None else str(s), quote=False)
+    """Этап 2.4 шаг 3: тонкая обёртка над core.html_safe.escape_html."""
+    return _escape_html(s)
 
 
 def build_post_html(
@@ -1072,31 +951,100 @@ def build_post_html(
     if include_partner and PARTNER_URL:
         hook = PARTNER_HOOKS[post_num % len(PARTNER_HOOKS)]
         parts.append("")
-        parts.append(hook.format(url=esc(PARTNER_URL)))
+        parts.append(hook.format(url=esc(_partner_url(PARTNER_URL, post_type=post_type))))
 
     parts.append("")
     # Stage 9: короткий дисклеймер в обычных постах. Длинный — для закрепа/гайдов.
-    disclaimer_text = DISCLAIMER if post_type == "fallback_education" else DISCLAIMER_SHORT
+    disclaimer_text = pick_disclaimer(post_type, day_seed=date.today())
     parts.append("<i>" + esc(disclaimer_text) + "</i>")
 
-    tags = payload.get("hashtags") or []
-    tags = [t if str(t).startswith("#") else f"#{t}" for t in tags]
-    system_tags: list[str] = ["#честный_путь"]
-    # Хомяк появился — отметим рубрикой #не_будь_хомяком, иначе #ошибки_новичка
-    if hamster:
-        system_tags.append("#не_будь_хомяком")
-    else:
-        system_tags.append("#ошибки_новичка")
-    if post_type == "flash":
-        system_tags.append("#flash")
-    elif post_type == "fallback_education":
-        system_tags.append("#термин_без_боли")
-    all_tags = list(dict.fromkeys(tags + system_tags))  # dedupe, preserve order
+    all_tags = _merge_post_tags(
+        payload.get("hashtags") or [],
+        post_type=post_type,
+        has_hamster=bool(hamster),
+        day_seed=date.today(),
+    )
     parts.append("")
     parts.append(" ".join(esc(t) for t in all_tags))
 
     text = "\n".join(parts).strip()
     # финальная чистка лишних двойных пустых строк
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    # Stage 13: caption-guard. Если Claude всё равно превысил бюджет и итог
+    # длиннее лимита caption фото (1024 chars) — обрезаем mentor_part по
+    # последнему абзацу до влезания. Beginner_mistake/lesson/partner/tags
+    # сохраняем как ключевую структуру.
+    if len(text) > TELEGRAM_PHOTO_CAPTION_LIMIT and mentor:
+        text = _shrink_to_caption_limit(payload, post_type, include_partner, post_num)
+    return text
+
+
+def _shrink_to_caption_limit(
+    payload: dict, post_type: str, include_partner: bool, post_num: int,
+) -> str:
+    """Перестраивает пост, по абзацам отрезая mentor_part с конца, пока итог
+    не влезет в TELEGRAM_PHOTO_CAPTION_LIMIT. Возвращает финальный HTML.
+    Если даже с пустым mentor не влазит — режет hamster_part.
+    """
+    mentor_full = (payload.get("mentor_part") or "").strip()
+    paragraphs = [p.strip() for p in mentor_full.split("\n\n") if p.strip()]
+    while paragraphs:
+        paragraphs.pop()  # убираем последний абзац mentor_part
+        trial_payload = dict(payload, mentor_part="\n\n".join(paragraphs))
+        trial = _build_post_html_raw(trial_payload, post_type, include_partner, post_num)
+        if len(trial) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+            log.warning("post shrunk: mentor_part trimmed to %d paragraphs (final=%d chars)",
+                        len(paragraphs), len(trial))
+            return trial
+    # mentor пустой — пробуем убрать hamster
+    trial_payload = dict(payload, mentor_part="", hamster_part=None)
+    trial = _build_post_html_raw(trial_payload, post_type, include_partner, post_num)
+    if len(trial) <= TELEGRAM_PHOTO_CAPTION_LIMIT:
+        log.warning("post shrunk: mentor+hamster removed (final=%d chars)", len(trial))
+        return trial
+    # совсем плохо — отдаём как есть, длинный split-flow в send_post_with_optional_image
+    log.error("post still > %d chars even after shrink, will split", TELEGRAM_PHOTO_CAPTION_LIMIT)
+    return _build_post_html_raw(payload, post_type, include_partner, post_num)
+
+
+def _build_post_html_raw(
+    payload: dict, post_type: str, include_partner: bool, post_num: int,
+) -> str:
+    """Внутренняя версия build_post_html без caption-guard (избегаем рекурсии)."""
+    parts: list[str] = []
+    human = esc(payload.get("human_part", "")).strip()
+    hamster = esc(payload.get("hamster_part") or "").strip()
+    mentor = esc(payload.get("mentor_part", "")).strip()
+    mistake = esc(payload.get("beginner_mistake") or "").strip()
+    lesson = esc(payload.get("lesson") or payload.get("conclusion") or "").strip()
+    if human:
+        parts.append(human)
+    if hamster:
+        parts += ["", "🐹 <b>Внутренний хомяк</b>", hamster]
+    if mentor:
+        parts += ["", "🤖 <b>AI-наставник</b>", mentor]
+    if mistake:
+        parts += ["", "⚠️ <b>Ошибка новичка</b>", mistake]
+    if lesson:
+        parts += ["", "📌 <b>Вывод</b>", lesson]
+    q = payload.get("question")
+    if q:
+        parts += ["", "💬 " + esc(q)]
+    if include_partner and PARTNER_URL:
+        hook = PARTNER_HOOKS[post_num % len(PARTNER_HOOKS)]
+        parts += ["", hook.format(url=esc(_partner_url(PARTNER_URL, post_type=post_type)))]
+    parts.append("")
+    disclaimer_text = pick_disclaimer(post_type, day_seed=date.today())
+    parts.append("<i>" + esc(disclaimer_text) + "</i>")
+    all_tags = _merge_post_tags(
+        payload.get("hashtags") or [],
+        post_type=post_type,
+        has_hamster=bool(hamster),
+        day_seed=date.today(),
+    )
+    parts += ["", " ".join(esc(t) for t in all_tags)]
+    text = "\n".join(parts).strip()
     while "\n\n\n" in text:
         text = text.replace("\n\n\n", "\n\n")
     return text
@@ -1135,6 +1083,12 @@ class Publisher:
         self.market = Market()
         self.claude = Anthropic(api_key=CLAUDE_API_KEY)
         self.openai = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+        # Этап 1.4: убираем зависимость от глобала. MistakeTracker создаётся
+        # локально, чтобы `--post-now` без scheduler не падал в fallback-ветке.
+        self.mistake_tracker = MistakeTracker(
+            themes_file=str(ROOT / "mistake_themes.json"),
+            state_file=str(ROOT / "mistake_tracker_state.json"),
+        )
 
     def _target_chat(self) -> str:
         if DRY_RUN:
@@ -1165,6 +1119,7 @@ class Publisher:
         source: str = "scheduled",
         user_action: str | None = None,
         image_context: str | None = None,
+        force_education: bool = False,
     ) -> None:
         state = load_state()
         post_num = int(state.get("post_count", 0)) + 1
@@ -1182,7 +1137,12 @@ class Publisher:
         post_type = "market"
         mode = "normal"
 
-        if not ticker or df is None or len(df) < 20:
+        if force_education:
+            # Stage 13: вечерний education-слот. Не зависит от рынка, мы просто
+            # переходим в обучающий режим с темой из MistakeTracker.
+            post_type = "fallback_education"
+            mode = "fallback_education"
+        elif not ticker or df is None or len(df) < 20:
             post_type = "fallback_education"
             mode = "fallback_education"
         elif ticker.get("change_24h") is not None and abs(ticker["change_24h"]) >= FLASH_THRESHOLD:
@@ -1193,7 +1153,14 @@ class Publisher:
         chart_path: Path | None = None
 
         if mode == "fallback_education":
-            market_snapshot = {"fallback_topic": random.choice(FALLBACK_TOPICS)}
+            # Используем MistakeTracker для равномерного покрытия тем
+            topic = self.mistake_tracker.get_next_topic()
+            market_snapshot = {"fallback_topic": topic}
+            # Запоминаем использование темы
+            for tid, info in self.mistake_tracker.themes.items():
+                if info["title"] == topic:
+                    self.mistake_tracker.record_usage(tid)
+                    break
         else:
             last = df.iloc[-1]
             def _f(col):
@@ -1251,6 +1218,25 @@ class Publisher:
         except Exception as e:
             log.exception("Claude failed: %s", e)
             return
+
+        # Этап 2.6: pre-publish style guard. forbidden_words → блокируем
+        # публикацию, шлём DM владельцу. Markers — soft warning, не блокировка.
+        try:
+            from core.styleguard_block import check_payload_or_reject
+            ok_style, style_reason = check_payload_or_reject(payload, styleguard)
+            if not ok_style:
+                log.warning("style block: %s", style_reason)
+                try:
+                    await self.bot.send_message(
+                        OWNER_CHAT_ID,
+                        f"⛔ Style block: {style_reason}\n\n"
+                        f"Пост не отправлен в канал.",
+                    )
+                except Exception:
+                    pass
+                return
+        except Exception as e:
+            log.warning("styleguard check failed (fail-open): %s", e)
 
         # --- image (по флагу + не чаще 1/N, flash может чаще) ---
         photo_path: Path | None = None
@@ -1349,15 +1335,29 @@ async def webhook(req: Request):
         image_context=data.get("image"),
     )
     return {"ok": True, "dry_run": DRY_RUN}
-# =============================================================================
-# MAIN
-# =============================================================================
 async def _safe_publish(publisher: Publisher, sentinel: Sentinel, source: str) -> None:
-    
-    """Обёртка для плановых публикаций с защитой Sentinel."""
-    await sentinel.safe_execute(publisher.publish(source=source), context=source)
+    """Обёртка для плановых публикаций с защитой Sentinel.
+
+    source `scheduled_evening_education` форсирует education-режим (Stage 13).
+    """
+    force_education = source == "scheduled_evening_education"
+    await sentinel.safe_execute(
+        publisher.publish(source=source, force_education=force_education),
+        context=source,
+    )
+
+async def _safe_mistake_report_job(bot: Bot, tracker: MistakeTracker):
+    try:
+        report = tracker.weekly_report()
+        if OWNER_CHAT_ID:
+            await bot.send_message(int(OWNER_CHAT_ID), report, parse_mode=ParseMode.HTML)
+        log.info("Mistake tracker weekly report sent.")
+    except Exception as e:
+        log.exception("Mistake report failed: %s", e)
 
 async def run_scheduler_forever() -> None:
+    global styleguard, mistake_tracker
+
     publisher = Publisher()
     _publisher_holder["p"] = publisher
 
@@ -1366,20 +1366,33 @@ async def run_scheduler_forever() -> None:
         bot=publisher.bot,
         channel_id=publisher._target_chat(),
         owner_chat_id=int(OWNER_CHAT_ID),
-        fallback_file=str(ROOT / "fallback_lessons.json")   # ← абсолютный путь
+        fallback_file=str(ROOT / "fallback_lessons.json")
     )
-    global styleguard
-    styleguard = StyleGuard(
-        forbidden_words_file=str(ROOT / "forbidden_words.json")
-    )
+    styleguard = StyleGuard()
+    # Этап 1.4: глобал mistake_tracker теперь зеркало publisher.mistake_tracker
+    # (Publisher.__init__ создаёт его сам, не зависит от scheduler-инициализации).
+    mistake_tracker = publisher.mistake_tracker
+
+    # === Передаём трекер в админ-панель ===
+    import admin_panel
+    admin_panel.mistake_tracker = mistake_tracker
 
     sched = AsyncIOScheduler(timezone=SCHEDULER_TZ)
+    # Stage 13: 10:00 ежедневно — market_chart; вечером 19:00 пн-сб —
+    # education (выравнивание content-mix к плану 40/20/15/15/10);
+    # вс 19:00 — weekly_diary (отдельным job ниже).
     sched.add_job(_safe_publish, "cron",
                   hour=POST_MORNING_HOUR, minute=0,
                   args=[publisher, sentinel, "scheduled_morning"])
     sched.add_job(_safe_publish, "cron",
+                  day_of_week="mon-sat",
                   hour=POST_EVENING_HOUR, minute=0,
-                  args=[publisher, sentinel, "scheduled_evening"])
+                  args=[publisher, sentinel, "scheduled_evening_education"])
+    sched.add_job(
+        _safe_mistake_report_job, "cron",
+        day_of_week="sun", hour=12, minute=0,
+        args=[publisher.bot, mistake_tracker]
+    )
 
     # news scan job — включается только если ENABLE_NEWS=true в .env
     try:
@@ -1418,6 +1431,29 @@ async def run_scheduler_forever() -> None:
             log.info("ENABLE_AUTHOR_NOTES=false — author_note job не активирован")
     except Exception as e:
         log.warning("не удалось инициализировать author_note job: %s", e)
+
+    # Stage 13: weekly_diary — воскресенье 19:00 МСК, превью владельцу
+    try:
+        from weekly_diary import WeeklyDiaryConfig as _WdCfg
+        _wd_cfg = _WdCfg.from_env()
+        if _wd_cfg.enable_weekly_diary:
+            sched.add_job(
+                _safe_weekly_diary_job, "cron",
+                day_of_week="sun", hour=19, minute=0, id="weekly_diary",
+            )
+            log.info("weekly_diary job: вс 19:00 %s | dry_run=%s",
+                     SCHEDULER_TZ, _wd_cfg.weekly_diary_dry_run)
+        else:
+            log.info("ENABLE_WEEKLY_DIARY=false — weekly_diary job не активирован")
+    except Exception as e:
+        log.warning("не удалось инициализировать weekly_diary job: %s", e)
+
+    # rebranding-3: daily channel_stats snapshot — 23:55 МСК
+    sched.add_job(
+        _safe_channel_stats_job, "cron",
+        hour=23, minute=55, id="channel_stats",
+    )
+    log.info("channel_stats job: 23:55 %s ежедневно", SCHEDULER_TZ)
 
     # auto-trade scan / tick jobs (Stage 7) — только если AUTO_TRADE_ENABLED=true
     try:
@@ -1548,9 +1584,14 @@ async def run_scheduler_forever() -> None:
     _register_confirm_callbacks(dp)
     _register_news_callbacks(dp)
     _register_author_note_callbacks(dp)
+    _register_weekly_diary_callbacks(dp)
     _register_trade_visual_handlers(dp)
     dp_bot = Bot(token=TELEGRAM_TOKEN, session=_ThreadedResolverSession())
     polling_task: asyncio.Task | None = None
+
+    # rebranding-4: catchup для pending news drafts при старте — отправляем свежие
+    # callback-кнопки взамен старых (старые мертвы, если бот был оффлайн в момент нажатия).
+    asyncio.create_task(_safe_news_catchup_job(publisher.bot))
 
     try:
         if ENABLE_WEBHOOK:
@@ -1622,44 +1663,32 @@ def _make_trade_send_fn(bot: Bot):
 
 # ---------- state helpers для trade-блока ---------------------------------
 
+# Этап 2.4 шаг 4: pure-state-mutators живут в core.trade_state.
+# Эти обёртки добавляют load_state/save_state I/O.
+
 def _today_utc_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    return _ts_today_utc_iso()
 
 
 def _state_get_trade_channel_posts_today() -> int:
-    """Возвращает количество торговых постов в канал за сегодня (UTC).
-
-    Если в state.json дата не сегодня — считаем 0 (счётчик протух).
-    """
-    s = load_state()
-    if s.get("trade_channel_posts_date") != _today_utc_iso():
-        return 0
-    try:
-        return int(s.get("trade_channel_posts_today") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return _ts_get_trade_posts(load_state())
 
 
 def _state_increment_trade_channel_posts_today() -> None:
     s = load_state()
-    today = _today_utc_iso()
-    if s.get("trade_channel_posts_date") != today:
-        s["trade_channel_posts_today"] = 1
-        s["trade_channel_posts_date"] = today
-    else:
-        s["trade_channel_posts_today"] = int(s.get("trade_channel_posts_today") or 0) + 1
+    _ts_inc_trade_posts(s)
     save_state(s)
 
 
 def _state_set_last_scan_at(ts: str) -> None:
     s = load_state()
-    s["last_trade_scan_at"] = ts
+    _ts_set_scan_at(s, ts)
     save_state(s)
 
 
 def _state_set_last_tick_at(ts: str) -> None:
     s = load_state()
-    s["last_trade_tick_at"] = ts
+    _ts_set_tick_at(s, ts)
     save_state(s)
 
 
@@ -1704,53 +1733,29 @@ def _state_set_gate_screenshot(trade_id: str, path: str) -> None:
     if not trade_id:
         return
     s = load_state()
-    m = s.get("gate_screenshots") or {}
-    if not isinstance(m, dict):
-        m = {}
-    m[trade_id] = path
-    s["gate_screenshots"] = m
+    _ts_set_gate_screenshot(s, trade_id, path)
     save_state(s)
 
 
 def _state_get_gate_screenshot(trade_id: str) -> str | None:
-    if not trade_id:
-        return None
-    s = load_state()
-    m = s.get("gate_screenshots") or {}
-    if not isinstance(m, dict):
-        return None
-    p = m.get(trade_id)
+    """Возвращает путь скриншота если файл существует на диске; иначе None.
+
+    Существование файла проверяется здесь (это I/O), а не в pure-helper.
+    """
+    p = _ts_get_gate_screenshot(load_state(), trade_id)
     if p and Path(p).exists():
         return p
     return None
 
 
 def _state_remember_trade_message(message_id: int, trade_id: str) -> None:
-    """Map: telegram message_id → trade_id, чтобы reply на сообщение сделки
-    мог идентифицировать trade без явного аргумента."""
-    if not message_id or not trade_id:
-        return
     s = load_state()
-    idx = s.get("trade_message_index") or {}
-    if not isinstance(idx, dict):
-        idx = {}
-    idx[str(message_id)] = trade_id
-    # rolling cap
-    if len(idx) > TRADE_MSG_INDEX_CAP:
-        keys = list(idx.keys())[-TRADE_MSG_INDEX_CAP:]
-        idx = {k: idx[k] for k in keys}
-    s["trade_message_index"] = idx
+    _ts_remember_trade_msg(s, message_id, trade_id, cap=TRADE_MSG_INDEX_CAP)
     save_state(s)
 
 
 def _state_lookup_trade_by_message(message_id: int) -> str | None:
-    if not message_id:
-        return None
-    s = load_state()
-    idx = s.get("trade_message_index") or {}
-    if not isinstance(idx, dict):
-        return None
-    return idx.get(str(message_id))
+    return _ts_lookup_trade_by_msg(load_state(), message_id)
 
 
 def _lookup_trade_by_id(trade_id: str):
@@ -1861,7 +1866,7 @@ async def _maybe_send_trade_visual(
             f"<b>{head_emoji} {head}</b>\n"
             + build_trade_summary_card(payload)
             + (f"\n\n<code>{html.escape(trade_id, quote=False)}</code>" if trade_id else "")
-            + "\n\n<i>Не финсовет. Это дневник обучения и AI-разбор.</i>"
+            + f"\n\n<i>{html.escape(pick_disclaimer('trade', day_seed=date.today()), quote=False)}</i>"
         )
         secondary_caption = (
             "📷 <b>Скрин Gate.io</b>\n"
@@ -2262,11 +2267,8 @@ def cfg_use_claude_for_trades() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-def _safe_log_dict(d) -> str:
-    try:
-        return json.dumps(d, ensure_ascii=False, default=str)[:500]
-    except Exception:
-        return str(d)[:500]
+# Этап 2.4 шаг 8: safe_log_dict живёт в core.log_dump.
+_safe_log_dict = _ld_safe_log_dict
 
 
 # ---------- scheduler jobs (Stage 7) ---------------------------------------
@@ -2510,16 +2512,12 @@ def _register_confirm_callbacks(dp: Dispatcher) -> None:
 # ---------- Stage 10: author-note review callbacks ----------
 
 def _state_get_awaiting_author_edit() -> str:
-    s = load_state()
-    return str(s.get("awaiting_author_edit_for") or "")
+    return _ds_get_awaiting_edit(load_state(), "author")
 
 
 def _state_set_awaiting_author_edit(draft_id: str | None) -> None:
     s = load_state()
-    if draft_id:
-        s["awaiting_author_edit_for"] = draft_id
-    else:
-        s.pop("awaiting_author_edit_for", None)
+    _ds_set_awaiting_edit(s, "author", draft_id)
     save_state(s)
 
 
@@ -2651,12 +2649,12 @@ def _register_author_note_callbacks(dp: Dispatcher) -> None:
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
-        draft = store.get(draft_id)
-        if not draft:
+        existing = store.get(draft_id)
+        if not existing:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        if existing.status in ("publishing", "published", "rejected"):
+            await cb.answer(f"Уже {existing.status}", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -2686,11 +2684,17 @@ def _register_author_note_callbacks(dp: Dispatcher) -> None:
                 pass
             return
 
+        draft = try_claim_for_publishing(store, draft_id)
+        if draft is None:
+            await cb.answer("Уже публикуется/обработано", show_alert=True)
+            return
+
         try:
             await cb.bot.send_message(CHANNEL_ID, draft.post_html,
                                       parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         except Exception as e:
             log.exception("author_publish send to channel failed: %s", e)
+            release_claim(store, draft_id, new_status="pending_review")
             try:
                 await cb.bot.send_message(OWNER_CHAT_ID,
                                           f"❌ Ошибка публикации: {html.escape(str(e), quote=False)}",
@@ -2788,95 +2792,174 @@ def _register_author_note_callbacks(dp: Dispatcher) -> None:
             pass
 
 
+# ---------- Stage 13: weekly_diary review callbacks ----------
+
+def _register_weekly_diary_callbacks(dp: Dispatcher) -> None:
+    """Stage 13: ✅ / ❌ для weekly_diary. Без regenerate/edit — отклонил и
+    перезапусти `python bot.py --weekly-now`."""
+    from weekly_diary import WeeklyDiaryStore
+
+    async def _is_owner_cb(cb: CallbackQuery) -> bool:
+        if not OWNER_CHAT_ID:
+            await cb.answer("Owner chat not configured", show_alert=True)
+            return False
+        if str(cb.from_user.id) != str(OWNER_CHAT_ID).lstrip("@"):
+            log.warning("weekly callback from non-owner user_id=%s; ignored", cb.from_user.id)
+            await cb.answer("Not allowed", show_alert=True)
+            return False
+        return True
+
+    def _store() -> "WeeklyDiaryStore":
+        return WeeklyDiaryStore(WEEKLY_DIARY_FILE)
+
+    @dp.callback_query(F.data.startswith("weekly_publish:"))
+    async def on_weekly_publish(cb: CallbackQuery):
+        if not await _is_owner_cb(cb):
+            return
+        draft_id = cb.data.split(":", 1)[1]
+        store = _store()
+        existing = store.get(draft_id)
+        if not existing:
+            await cb.answer("Черновик не найден", show_alert=True)
+            return
+        if existing.status in ("publishing", "published", "rejected"):
+            await cb.answer(f"Уже {existing.status}", show_alert=True)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        from weekly_diary import WeeklyDiaryConfig
+        cfg = WeeklyDiaryConfig.from_env()
+        await cb.answer("Публикую…", show_alert=False)
+        reasons: list[str] = []
+        if cfg.weekly_diary_dry_run:
+            reasons.append("WEEKLY_DIARY_DRY_RUN=true. Публикация заблокирована.")
+        if not CHANNEL_ID:
+            reasons.append("CHANNEL_ID не задан в .env.")
+        if reasons:
+            try:
+                await cb.bot.send_message(
+                    OWNER_CHAT_ID,
+                    "🚫 <b>Публикация заблокирована флагами</b>\n\n" + "\n".join(
+                        f"• {html.escape(r, quote=False)}" for r in reasons
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+
+        draft = try_claim_for_publishing(store, draft_id)
+        if draft is None:
+            await cb.answer("Уже публикуется/обработано", show_alert=True)
+            return
+
+        try:
+            await cb.bot.send_message(CHANNEL_ID, draft.post_html,
+                                      parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            log.exception("weekly_publish send to channel failed: %s", e)
+            release_claim(store, draft_id, new_status="pending_review")
+            try:
+                await cb.bot.send_message(OWNER_CHAT_ID,
+                                          f"❌ Ошибка публикации: {html.escape(str(e), quote=False)}",
+                                          parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+            return
+
+        draft.status = "published"
+        store.update(draft)
+        try:
+            _log_post_event(
+                "weekly_diary", published_to="channel",
+                title=((draft.claude_json or {}).get("title") or "Дневник недели")[:120],
+                source="weekly_callback",
+            )
+        except Exception:
+            pass
+        try:
+            await cb.bot.send_message(
+                OWNER_CHAT_ID,
+                f"✅ Weekly diary опубликован в {html.escape(CHANNEL_ID, quote=False)} "
+                f"(draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code>)",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    @dp.callback_query(F.data.startswith("weekly_reject:"))
+    async def on_weekly_reject(cb: CallbackQuery):
+        if not await _is_owner_cb(cb):
+            return
+        draft_id = cb.data.split(":", 1)[1]
+        store = _store()
+        draft = store.get(draft_id)
+        if not draft:
+            await cb.answer("Черновик не найден", show_alert=True)
+            return
+        if draft.status in ("published", "rejected"):
+            await cb.answer(f"Уже {draft.status}", show_alert=True)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        draft.status = "rejected"
+        store.update(draft)
+        await cb.answer("Отклонено.", show_alert=False)
+        try:
+            await cb.bot.send_message(
+                OWNER_CHAT_ID,
+                f"❌ Weekly diary отклонён (draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code>).",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+
 # ---------- Stage 6b: news review callbacks ----------
 
 def _state_get_awaiting_news_edit() -> str:
-    s = load_state()
-    return str(s.get("awaiting_news_edit_for") or "")
+    return _ds_get_awaiting_edit(load_state(), "news")
 
 
 def _state_set_awaiting_news_edit(draft_id: str | None) -> None:
     s = load_state()
-    if draft_id:
-        s["awaiting_news_edit_for"] = draft_id
-    else:
-        s.pop("awaiting_news_edit_for", None)
+    _ds_set_awaiting_edit(s, "news", draft_id)
     save_state(s)
 
 
-# Stage 12e — image-intent triggers, разделённые на два класса:
-# AI-intent → вызвать OpenAI (через news_generate_ai_image),
-# source-intent → вытащить og:image из источника (через news_refresh_source_image).
-# Default: AI-намерение требует явных слов «сгенери» / «нарисуй» / «AI-картинка».
-# Source-намерение: «возьми из источника», «обнови превью», «og image».
-
-_AI_IMAGE_PATTERNS = (
-    "сгенери",                  # сгенери / сгенерируй
-    "нарисуй",
-    "сделай ai-картин",
-    "сделай ии-картин",
-    "сделай arт",
-    "сделай арт",
-    "новая ai",
-    "новую ai",
-    "ai-картин",
-    "ии-картин",
-    "ai картин",
-    "ии картин",
-    "тематичес",                # «сгенерируй тематическое изображение»
-    "перерисуй картин",
-    "перегенери картин",
-    "regenerate image",
-    "generate image",
-    "new image",
-    "another image",
-    "🖼",
-)
-
-_SOURCE_IMAGE_PATTERNS = (
-    "из источника",             # «возьми картинку из источника»
-    "превью источника",
-    "обнови превью",
-    "обнови картин",            # «обнови картинку из источника»
-    "source image",
-    "og image",
-    "og:image",
-    "twitter:image",
-    "🔄",
-)
+def _state_get_news_post_counter() -> int:
+    """Stage 14 — счётчик опубликованных в канал news-постов (для mistake_theme inject)."""
+    return _ds_get_news_counter(load_state())
 
 
-def _looks_like_ai_image_request(text: str) -> bool:
-    s = (text or "").strip().lower()
-    if not s or len(s) > 80:
-        return False
-    if "ai" in s and ("картин" in s or "изображ" in s):
-        return True
-    if any(p in s for p in _AI_IMAGE_PATTERNS):
-        return True
-    # «сделай картинку», «новую картинку» — без префикса AI считаются AI (legacy backward-compat),
-    # но только если нет явного source-маркера в той же фразе.
-    if "из источник" in s or "source" in s or "og:" in s:
-        return False
-    if "картин" in s and ("сгенери" in s or "нарисуй" in s or "сделай" in s
-                          or "новая" in s or "новую" in s or "перерисуй" in s):
-        return True
-    if "изображ" in s and ("сгенери" in s or "нарисуй" in s or "сделай" in s
-                           or "новое" in s or "перерисуй" in s):
-        return True
-    return False
+def _state_inc_news_post_counter() -> int:
+    """Stage 14 — atomic increment, возвращает новое значение."""
+    s = load_state()
+    new_val = _ds_inc_news_counter(s)
+    save_state(s)
+    return new_val
 
 
-def _looks_like_source_image_request(text: str) -> bool:
-    s = (text or "").strip().lower()
-    if not s or len(s) > 80:
-        return False
-    return any(p in s for p in _SOURCE_IMAGE_PATTERNS)
-
-
-# legacy alias — оставлен на случай если в коде ещё есть вызовы; делегирует к AI-варианту
-def _looks_like_image_request(text: str) -> bool:
-    return _looks_like_ai_image_request(text) or _looks_like_source_image_request(text)
+# Этап 2.4 шаг 7: image-intent логика и patterns теперь в core.image_intent.
+_looks_like_ai_image_request = _ii_ai_request
+_looks_like_source_image_request = _ii_source_request
+_looks_like_image_request = _ii_any_request
 
 
 def _rebuild_draft_post_html(draft) -> None:
@@ -3153,11 +3236,18 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         )
 
     async def _send_preview(bot: Bot, draft) -> None:
-        from news import NewsItem, validate_payload_for_publish
-        sn = draft.source_news
+        """Stage 14: превью владельцу = header сообщение + (опц.guard) + сам пост.
+
+        Сам пост идёт точно так, как пошёл бы в канал — фото+caption или text-only.
+        Header не вмешивается в HTML поста чтобы не превышать caption-лимит 1024.
+        """
+        from news import NewsItem, validate_payload_for_publish, validate_payload_v2
+        sn = draft.source_news or {}
         sector = html.escape(sn.get("sector") or "-", quote=False)
         impact = int(sn.get("impact_score") or 0)
-        # пересчитываем guard-причины на лету (после revise/regenerate они могут пропасть)
+        cj = draft.claude_json or {}
+        schema_version = getattr(draft, "schema_version", "v1")
+        tone = str(cj.get("tone") or "-")
         try:
             _item = NewsItem(
                 title=sn.get("title") or "",
@@ -3170,28 +3260,46 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
                 sector=sn.get("sector") or "other",
                 impact_score=float(sn.get("impact_score") or 0.0),
             )
-            guard = validate_payload_for_publish(draft.claude_json or {}, _item)
+            if schema_version == "v2":
+                guard = validate_payload_v2(cj, _item)
+            else:
+                guard = validate_payload_for_publish(cj, _item)
         except Exception:
             guard = []
-        head_lines = [
-            "🧪 <b>Превью новостного поста — нужен ревью</b>",
-            f"draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code> | "
-            f"sector: {sector} | impact: {impact} | rev: {draft.revision_count}",
-        ]
+
+        # 1) Header — отдельное мини-сообщение
+        header = (
+            f"🧪 Превью #<code>{html.escape(draft.draft_id[:8], quote=False)}</code> · "
+            f"sector={sector} · impact={impact} · "
+            f"tone={html.escape(tone, quote=False)} · rev={draft.revision_count}"
+        )
         if draft.image_path:
-            head_lines.append(f"🖼 image: <code>{html.escape(Path(draft.image_path).name, quote=False)}</code>")
+            header += f"\n🖼 {html.escape(Path(draft.image_path).name, quote=False)}"
+        try:
+            await bot.send_message(
+                OWNER_CHAT_ID, header,
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.warning("_send_preview header failed: %s", e)
+
+        # 2) (опц.) guard reasons
         if guard:
-            head_lines.append("")
-            head_lines.append("🚫 <b>Publish-guard:</b>")
-            for r in guard[:6]:
-                head_lines.append(f"• {html.escape(r, quote=False)}")
-            head_lines.append("Исправь правкой ✏️ / перегенерь 🔁 / 🖼 — потом ✅.")
-        head_lines.append("──────────────")
-        head = "\n".join(head_lines)
-        cj = draft.claude_json or {}
+            guard_text = "🚫 <b>Publish-guard:</b>\n" + "\n".join(
+                f"• {html.escape(r, quote=False)}" for r in guard[:6]
+            ) + "\nИсправь правкой ✏️ / перегенерь 🔁 / 🖼 — потом ✅."
+            try:
+                await bot.send_message(
+                    OWNER_CHAT_ID, guard_text,
+                    parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                )
+            except Exception as e:
+                log.warning("_send_preview guard failed: %s", e)
+
+        # 3) Сам пост — как в канал, с кнопками
         await send_post_with_optional_image(
             bot, OWNER_CHAT_ID,
-            head + "\n\n" + draft.post_html,
+            draft.post_html,
             draft.image_path or None,
             title=str(cj.get("specific_title") or ""),
             brief=str(cj.get("brief_review") or cj.get("short_summary") or ""),
@@ -3200,7 +3308,19 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_publish:"))
     async def on_news_publish(cb: CallbackQuery):
+        log.info(
+            "CB news_publish: from=%s data=%s msg_id=%s",
+            cb.from_user.id if cb.from_user else "?",
+            cb.data,
+            cb.message.message_id if cb.message else "?",
+        )
+        await cb.answer()  # Stage 14: ack СРАЗУ, до тяжёлой логики
         if not await _is_owner_cb(cb):
+            log.warning(
+                "CB news_publish: not owner (from=%s expected=%s)",
+                cb.from_user.id if cb.from_user else "?",
+                OWNER_CHAT_ID,
+            )
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3208,15 +3328,20 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         if not draft:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        # Stage 14 idempotency: расширенный TERMINAL включая publishing
+        TERMINAL = {"published", "rejected", "publishing"}
+        if draft.status in TERMINAL:
+            await cb.answer(f"Уже обработано ({draft.status})", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
             return
 
-        await cb.answer("Публикую…", show_alert=False)
+        # Stage 14: переводим в publishing СРАЗУ, чтобы второй клик увидел terminal
+        draft.status = "publishing"
+        store.update(draft)
+
         reasons = _publish_guard_reasons()
         if reasons:
             draft.status = "approved"
@@ -3258,6 +3383,9 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
             payload_reasons = [f"publish-guard crashed: {e}"]
 
         if payload_reasons:
+            # Откат статуса — владелец будет править/регенерировать
+            draft.status = "pending_review"
+            store.update(draft)
             try:
                 await _send_dm_html(
                     cb.bot,
@@ -3281,6 +3409,9 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
             )
         except Exception as e:
             log.exception("news_publish: send to channel failed: %s", e)
+            # Stage 14: откат idempotency — позволяем владельцу повторить
+            draft.status = "pending_review"
+            store.update(draft)
             try:
                 await _send_dm_html(cb.bot, f"❌ Ошибка публикации в канал: {html.escape(str(e), quote=False)}")
             except Exception:
@@ -3289,6 +3420,12 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
         draft.status = "published"
         store.update(draft)
+
+        # Stage 14: инкрементируем news_post_counter в state.json
+        try:
+            _state_inc_news_post_counter()
+        except Exception as e:
+            log.warning("news_post_counter inc failed: %s", e)
 
         # отметим в news_history.json (для дедупа и счётчика postedToday)
         try:
@@ -3338,7 +3475,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_reject:"))
     async def on_news_reject(cb: CallbackQuery):
+        log.info(
+            "CB news_reject: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_reject: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3346,8 +3489,9 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         if not draft:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        TERMINAL = {"published", "rejected", "publishing"}
+        if draft.status in TERMINAL:
+            await cb.answer(f"Уже обработано ({draft.status})", show_alert=True)
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -3388,7 +3532,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_regenerate:"))
     async def on_news_regenerate(cb: CallbackQuery):
+        log.info(
+            "CB news_regenerate: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_regenerate: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3396,8 +3546,8 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
         if not draft:
             await cb.answer("Черновик не найден", show_alert=True)
             return
-        if draft.status in ("published", "rejected"):
-            await cb.answer(f"Уже {draft.status}", show_alert=True)
+        if draft.status in ("published", "rejected", "publishing"):
+            await cb.answer(f"Уже обработано ({draft.status})", show_alert=True)
             return
         if not CLAUDE_API_KEY:
             await cb.answer("CLAUDE_API_KEY не задан", show_alert=True)
@@ -3480,7 +3630,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
     @dp.callback_query(F.data.startswith("news_generate_ai_image:"))
     async def on_news_generate_ai_image(cb: CallbackQuery):
         """Stage 12e — единственная кнопка, вызывающая OpenAI Image API."""
+        log.info(
+            "CB news_generate_ai_image: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_generate_ai_image: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3545,7 +3701,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
     @dp.callback_query(F.data.startswith("news_refresh_source_image:"))
     async def on_news_refresh_source_image(cb: CallbackQuery):
         """Stage 12e — заново вытащить og:image / twitter:image из источника."""
+        log.info(
+            "CB news_refresh_source_image: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_refresh_source_image: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3603,7 +3765,13 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
 
     @dp.callback_query(F.data.startswith("news_edit:"))
     async def on_news_edit(cb: CallbackQuery):
+        log.info(
+            "CB news_edit: from=%s data=%s",
+            cb.from_user.id if cb.from_user else "?", cb.data,
+        )
+        await cb.answer()
         if not await _is_owner_cb(cb):
+            log.warning("CB news_edit: not owner")
             return
         draft_id = cb.data.split(":", 1)[1]
         store = _store()
@@ -3956,36 +4124,29 @@ async def send_post_with_optional_image(
             log.warning("post image_path bad: %s (%s)", image_path, e)
 
     if img is None:
-        await bot.send_message(
-            chat_id, post_html,
-            parse_mode=parse_mode,
-            disable_web_page_preview=disable_web_page_preview,
-            reply_markup=reply_markup,
-        )
+        chunks = split_html_for_telegram(post_html, limit=TELEGRAM_MESSAGE_LIMIT)
+        if not chunks:
+            return
+        last_idx = len(chunks) - 1
+        for i, chunk in enumerate(chunks):
+            await bot.send_message(
+                chat_id, chunk,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+                reply_markup=reply_markup if i == last_idx else None,
+            )
         return
 
     photo = FSInputFile(str(img))
 
-    if len(post_html) <= PHOTO_CAPTION_SAFE_LIMIT:
-        await bot.send_photo(
-            chat_id, photo,
-            caption=post_html,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-        )
-        return
-
-    # caption-split: photo с короткой подписью БЕЗ кнопок, кнопки — на полный текст
-    short = _build_short_caption(post_html, title=title, brief=brief)
+    # Stage 14: всегда photo+caption одним сообщением, без split.
+    # Upstream (truncate cascade + final_caption_guard в news pipeline,
+    # caption-fit в market posts) гарантирует ≤ 1024 chars.
+    # Если caption > 1024 — это баг upstream, падаем с TelegramBadRequest.
     await bot.send_photo(
         chat_id, photo,
-        caption=short,
+        caption=post_html,
         parse_mode=parse_mode,
-    )
-    await bot.send_message(
-        chat_id, post_html,
-        parse_mode=parse_mode,
-        disable_web_page_preview=disable_web_page_preview,
         reply_markup=reply_markup,
     )
 
@@ -4007,14 +4168,68 @@ async def _news_preview_send(
     text: str,
     kb_dict: dict,
     image_path: Optional[str] = None,
+    meta: Optional[dict] = None,
 ) -> None:
-    """Адаптер под NewsPublisher.PreviewSendFn — превью владельцу с inline-кнопками."""
+    """Превью владельцу одним сообщением: header-чип + сам пост с кнопками.
+
+    Header (draft_id · impact · sector · tone) встраивается в верх caption'а
+    через <i>...</i> — Telegram рендерит его серой строкой над постом. Если
+    image+caption превысит 1024 — fallback: header отдельным мини-сообщением.
+
+    Guard-блок (редкий случай, только если publish-guard сработал) шлётся
+    отдельно перед постом — там можно увидеть несколько причин в виде списка.
+    """
     if not OWNER_CHAT_ID:
         log.warning("news preview: OWNER_CHAT_ID не задан, skip")
         return
+
+    header_text = ""
+    if meta:
+        draft_id = str(meta.get("draft_id") or "")[:8]
+        sector = str(meta.get("sector") or "-")
+        impact = int(meta.get("impact") or 0)
+        tone = str(meta.get("tone") or "-")
+        header_text = (
+            f"<i>🧪 #{html.escape(draft_id)} · impact {impact} · "
+            f"{html.escape(sector)} · {html.escape(tone)}</i>"
+        )
+
+        guard_reasons = list(meta.get("guard_reasons") or [])
+        if guard_reasons:
+            guard_text = "🚫 <b>Publish-guard заблокировал автопубликацию:</b>\n" + "\n".join(
+                f"• {html.escape(r, quote=False)}" for r in guard_reasons[:6]
+            )
+            try:
+                await bot.send_message(
+                    OWNER_CHAT_ID, guard_text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                log.warning("news preview guard send failed: %s", e)
+
+    # Готовим итоговый текст: header сверху + пустая строка + пост.
+    if header_text:
+        combined = f"{header_text}\n\n{text}"
+    else:
+        combined = text
+
+    # Caption-fit: если фото есть и итог > 1024 — fallback на старый путь (header отдельно).
+    PHOTO_CAPTION_LIMIT = 1024
+    if header_text and image_path and len(combined) > PHOTO_CAPTION_LIMIT:
+        try:
+            await bot.send_message(
+                OWNER_CHAT_ID, header_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.warning("news preview header (fallback) send failed: %s", e)
+        combined = text  # сам пост уходит без вшитого header'а
+
     await send_post_with_optional_image(
-        bot, OWNER_CHAT_ID, text, image_path,
-        reply_markup=_keyboard_from_dict(kb_dict),
+        bot, OWNER_CHAT_ID, combined, image_path,
+        reply_markup=_keyboard_from_dict(kb_dict) if kb_dict else None,
     )
 
 
@@ -4113,8 +4328,10 @@ async def run_news_now_cmd() -> None:
             claude_model=CLAUDE_MODEL,
             market_snapshot=_market_snapshot_for_news(),
             drafts_path=NEWS_DRAFTS_FILE,
-            preview_send_fn=lambda text, kb, image_path=None: _news_preview_send(bot, text, kb, image_path),
+            preview_send_fn=lambda text, kb, image_path=None, meta=None: _news_preview_send(bot, text, kb, image_path, meta),
             image_provider=_news_image_provider,
+            counter_get=_state_get_news_post_counter,
+            counter_inc=_state_inc_news_post_counter,
         )
         log.info("news_now result: %s", result)
         # Stage 10+: учёт в контент-миксе
@@ -4475,27 +4692,12 @@ async def run_news_debug_cmd() -> None:
 
 def _state_get_author_notes_week_count() -> int:
     """Сколько author_notes опубликовано в текущей ISO-неделе (по UTC)."""
-    s = load_state()
-    today = datetime.now(tz=timezone.utc).isocalendar()
-    key = f"{today.year}-{today.week:02d}"
-    if s.get("author_notes_week_key") != key:
-        return 0
-    try:
-        return int(s.get("author_notes_week_count") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return _ds_get_author_week_count(load_state())
 
 
 def _state_increment_author_notes_week_count() -> None:
     s = load_state()
-    today = datetime.now(tz=timezone.utc).isocalendar()
-    key = f"{today.year}-{today.week:02d}"
-    if s.get("author_notes_week_key") != key:
-        s["author_notes_week_count"] = 1
-        s["author_notes_week_key"] = key
-    else:
-        s["author_notes_week_count"] = int(s.get("author_notes_week_count") or 0) + 1
-    s["last_author_note_at"] = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+    _ds_inc_author_week(s)
     save_state(s)
 
 
@@ -4655,6 +4857,168 @@ async def _safe_author_note_job() -> None:
         await run_author_note_now_cmd(rubric_key=None)
     except Exception as e:
         log.exception("author_note job crashed: %s", e)
+
+
+# =============================================================================
+# Stage 13 — Weekly diary
+# =============================================================================
+
+async def _weekly_diary_preview_send(bot: Bot, text: str, kb_dict: dict) -> None:
+    if not OWNER_CHAT_ID:
+        log.warning("weekly_diary preview: OWNER_CHAT_ID не задан, skip")
+        return
+    await bot.send_message(
+        OWNER_CHAT_ID, text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=_keyboard_from_dict(kb_dict),
+    )
+
+
+async def _weekly_diary_send(bot: Bot, chat_id: str, text: str) -> None:
+    if not chat_id:
+        log.warning("weekly_diary send: chat_id пустой, skip")
+        return
+    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+async def run_weekly_diary_now_cmd() -> None:
+    """Stage 13: собрать дневник недели по history.json и отправить владельцу на ревью."""
+    from weekly_diary import WeeklyDiaryConfig, run_weekly_diary_now
+    cfg = WeeklyDiaryConfig.from_env()
+    if not cfg.enable_weekly_diary:
+        print("ENABLE_WEEKLY_DIARY=false — пропускаем")
+        return
+    if not CLAUDE_API_KEY:
+        raise RuntimeError("CLAUDE_API_KEY не задан — weekly_diary невозможен")
+    claude = Anthropic(api_key=CLAUDE_API_KEY)
+    bot = _new_trading_bot()
+    try:
+        result = await run_weekly_diary_now(
+            config=cfg,
+            claude=claude,
+            claude_model=CLAUDE_MODEL,
+            history_path=HISTORY_FILE,
+            drafts_path=WEEKLY_DIARY_FILE,
+            owner_chat_id=OWNER_CHAT_ID,
+            channel_id=CHANNEL_ID,
+            send_fn=lambda chat_id, text: _weekly_diary_send(bot, chat_id, text),
+            preview_send_fn=lambda text, kb: _weekly_diary_preview_send(bot, text, kb),
+        )
+        log.info("weekly_diary result: %s", result)
+        try:
+            if (result or {}).get("decision") == "preview_sent":
+                _log_post_event("weekly_diary", published_to="owner",
+                                title="Дневник недели", source="weekly_diary_cli")
+        except Exception:
+            pass
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        await bot.session.close()
+
+
+async def _safe_weekly_diary_job() -> None:
+    """Scheduler job: воскресенье 19:00 — собрать дневник недели и отправить
+    владельцу на ревью."""
+    try:
+        from weekly_diary import WeeklyDiaryConfig
+        cfg = WeeklyDiaryConfig.from_env()
+        if not cfg.enable_weekly_diary:
+            return
+        await run_weekly_diary_now_cmd()
+    except Exception as e:
+        log.exception("weekly_diary job crashed: %s", e)
+
+
+async def _safe_channel_stats_job() -> None:
+    """rebranding-3: daily snapshot канала в state.channel_stats_log."""
+    try:
+        import subprocess
+        import sys as _sys
+        from pathlib import Path as _Path
+        script = _Path(__file__).resolve().parent / "scripts" / "channel_stats.py"
+        # subprocess чтобы изолировать aiogram Bot (мы внутри уже-запущенной loop)
+        result = subprocess.run(
+            [_sys.executable, str(script)],
+            capture_output=True, timeout=60, text=True, encoding="utf-8",
+        )
+        if result.returncode == 0:
+            log.info("channel_stats job: ok | %s", (result.stdout or "").strip().replace("\n", " | "))
+        else:
+            log.warning("channel_stats job: rc=%d | stderr=%s", result.returncode, result.stderr[:300])
+    except Exception as e:
+        log.exception("channel_stats job crashed: %s", e)
+
+
+async def _safe_news_catchup_job(bot: Bot) -> None:
+    """rebranding-4: при старте бота отправить владельцу свежие callback-кнопки
+    для всех pending_review news drafts. Чинит ситуацию когда старые кнопки
+    мертвы из-за того что бот был оффлайн в момент нажатия.
+
+    Идемпотентность: state.json.news_catchup_sent_ids хранит set отправленных
+    draft_id, чтобы не спамить владельца при каждом перезапуске.
+    """
+    try:
+        if not OWNER_CHAT_ID:
+            return
+        from news import DraftStore, review_keyboard
+        from core.json_store import update_json
+        store = DraftStore(NEWS_DRAFTS_FILE)
+        pending = store.list_pending()
+        if not pending:
+            log.info("news catchup: 0 pending drafts")
+            return
+
+        state_path = ROOT / "state.json"
+        sent_ids: set[str] = set()
+
+        def _read_sent(s: dict) -> dict:
+            nonlocal sent_ids
+            sent_ids = set(s.get("news_catchup_sent_ids") or [])
+            return s
+
+        update_json(state_path, default={}, expected_type=dict, mutator=_read_sent)
+
+        fresh = [d for d in pending if d.draft_id not in sent_ids]
+        if not fresh:
+            log.info("news catchup: %d pending, все уже отправлены ранее", len(pending))
+            return
+
+        log.info("news catchup: %d pending, %d свежих к отправке", len(pending), len(fresh))
+        sent_now: list[str] = []
+        for draft in fresh:
+            try:
+                sn = draft.source_news or {}
+                sector = (sn.get("sector") or "-")
+                impact = int(sn.get("impact_score") or 0)
+                title = (sn.get("title") or "")[:140]
+                summary = (
+                    f"🔁 <b>Catchup news draft</b>\n"
+                    f"draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code>\n"
+                    f"sector: {html.escape(sector, quote=False)} | impact: {impact} | rev: {draft.revision_count}\n"
+                    f"title: {html.escape(title, quote=False)}\n"
+                    f"\n<i>Старые кнопки могли устареть. Эти — свежие.</i>"
+                )
+                await bot.send_message(
+                    OWNER_CHAT_ID, summary,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_keyboard_from_dict(review_keyboard(draft.draft_id)),
+                )
+                sent_now.append(draft.draft_id)
+            except Exception as e:
+                log.warning("news catchup: send для draft_id=%s упал: %s", draft.draft_id, e)
+
+        if sent_now:
+            def _save_sent(s: dict) -> dict:
+                cur = set(s.get("news_catchup_sent_ids") or [])
+                cur.update(sent_now)
+                # ограничим до 200 последних чтобы не разрастался
+                s["news_catchup_sent_ids"] = list(cur)[-200:]
+                return s
+            update_json(state_path, default={}, expected_type=dict, mutator=_save_sent)
+            log.info("news catchup: отправил %d, сохранил в state", len(sent_now))
+    except Exception as e:
+        log.exception("news catchup job crashed: %s", e)
 
 
 async def run_news_drafts_cmd() -> None:
@@ -4860,6 +5224,9 @@ def main() -> None:
                         help="(Stage 10) пометить конкретный author_note rejected")
     parser.add_argument("--content-mix", action="store_true",
                         help="(Stage 10+) показать 7-дневный content-mix breakdown + recommendation")
+    # Stage 13 — weekly diary
+    parser.add_argument("--weekly-now", action="store_true",
+                        help="(Stage 13) собрать дневник недели по history.json и отправить владельцу на ревью")
     # Stage 11 — render trade-card on demand
     parser.add_argument("--render-last-trade-visual", action="store_true",
                         help="(Stage 11) отрендерить trade-card для последней сделки и отправить владельцу")
@@ -4919,6 +5286,8 @@ def main() -> None:
         asyncio.run(run_reject_author_note_cmd(args.reject_author_note))
     elif args.content_mix:
         asyncio.run(run_content_mix_cmd())
+    elif args.weekly_now:
+        asyncio.run(run_weekly_diary_now_cmd())
     elif args.render_last_trade_visual:
         asyncio.run(run_render_trade_visual_cmd(None))
     elif args.render_trade_visual:

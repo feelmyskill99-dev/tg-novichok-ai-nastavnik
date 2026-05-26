@@ -14,7 +14,6 @@ from .analyzer import NewsAnalyzer
 from .publisher import (
     NewsPublisher,
     build_html as build_news_html,
-    short_caption as build_news_caption,
     validate_payload_for_publish,
     is_generic_title,
     news_hash,
@@ -47,7 +46,6 @@ __all__ = [
     "NewsAnalyzer",
     "NewsPublisher",
     "build_news_html",
-    "build_news_caption",
     "validate_payload_for_publish",
     "is_generic_title",
     "news_hash",
