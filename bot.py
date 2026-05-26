@@ -89,6 +89,7 @@ from core.content_mix_writer import (
 )
 from core.post_tags import merge_tags as _merge_post_tags
 from core.html_safe import escape_html as _escape_html
+from core.partner_link import build_partner_url as _partner_url
 from core.trade_state import (
     get_gate_screenshot as _ts_get_gate_screenshot,
     get_trade_channel_posts_today as _ts_get_trade_posts,
@@ -950,7 +951,7 @@ def build_post_html(
     if include_partner and PARTNER_URL:
         hook = PARTNER_HOOKS[post_num % len(PARTNER_HOOKS)]
         parts.append("")
-        parts.append(hook.format(url=esc(PARTNER_URL)))
+        parts.append(hook.format(url=esc(_partner_url(PARTNER_URL, post_type=post_type))))
 
     parts.append("")
     # Stage 9: короткий дисклеймер в обычных постах. Длинный — для закрепа/гайдов.
@@ -1032,7 +1033,7 @@ def _build_post_html_raw(
         parts += ["", "💬 " + esc(q)]
     if include_partner and PARTNER_URL:
         hook = PARTNER_HOOKS[post_num % len(PARTNER_HOOKS)]
-        parts += ["", hook.format(url=esc(PARTNER_URL))]
+        parts += ["", hook.format(url=esc(_partner_url(PARTNER_URL, post_type=post_type)))]
     parts.append("")
     disclaimer_text = pick_disclaimer(post_type, day_seed=date.today())
     parts.append("<i>" + esc(disclaimer_text) + "</i>")
