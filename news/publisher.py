@@ -7,7 +7,7 @@ Stage 12b: единый строгий формат поста (specific_title �
 
 Публикует в канал только если:
     ENABLE_NEWS=true
-    NEWS_PUBLISH_TO_CHANNEL=true
+    NEWS_PUBLISH_TO_CHANNEL=true  ИЛИ  impact_score >= NEWS_AUTO_PUBLISH_MIN_IMPACT (если >0)
     NEWS_DRY_RUN=false
     impact_score >= NEWS_MIN_IMPACT_SCORE
     payload прошёл validate_payload_for_publish()
@@ -985,9 +985,16 @@ class NewsPublisher:
                 self.dedup.remember(item, "skipped", short_summary=f"caption guard: {reason}")
                 return "skipped"
 
+        # Авто-публикация по impact: если NEWS_AUTO_PUBLISH_MIN_IMPACT>0
+        # и item.impact_score >= порога, обходим ручное NEWS_PUBLISH_TO_CHANNEL.
+        auto_publish_threshold = self.cfg.news_auto_publish_min_impact
+        impact_bypass = (
+            auto_publish_threshold > 0
+            and item.impact_score >= auto_publish_threshold
+        )
         channel_allowed = (
             self.cfg.enable_news
-            and self.cfg.news_publish_to_channel
+            and (self.cfg.news_publish_to_channel or impact_bypass)
             and not self.cfg.news_dry_run
             and self.channel_id
             and not guard_reasons

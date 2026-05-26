@@ -37,6 +37,12 @@ class NewsConfig:
     news_publish_to_channel: bool = False
     news_send_to_owner: bool = True
 
+    # Авто-публикация новостей с высоким impact (минуя ручное ревью).
+    # 0 = выключено. >0 = новости с item.impact_score >= порога идут сразу в канал
+    # (с сохранением остальных предохранителей: news_max_posts_per_day,
+    # news_dry_run, enable_news, dedup, guard).
+    news_auto_publish_min_impact: int = 0
+
     news_humor_level: str = "light"       # off | light | medium
     news_sarcasm_level: str = "light"     # off | light | medium
 
@@ -78,6 +84,7 @@ class NewsConfig:
 
             news_publish_to_channel=_bool("NEWS_PUBLISH_TO_CHANNEL", False),
             news_send_to_owner=_bool("NEWS_SEND_TO_OWNER", True),
+            news_auto_publish_min_impact=_int("NEWS_AUTO_PUBLISH_MIN_IMPACT", 0),
 
             news_humor_level=_str("NEWS_HUMOR_LEVEL", "light").lower(),
             news_sarcasm_level=_str("NEWS_SARCASM_LEVEL", "light").lower(),
