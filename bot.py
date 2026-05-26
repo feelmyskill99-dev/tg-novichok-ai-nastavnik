@@ -1447,6 +1447,13 @@ async def run_scheduler_forever() -> None:
     except Exception as e:
         log.warning("не удалось инициализировать weekly_diary job: %s", e)
 
+    # rebranding-3: daily channel_stats snapshot — 23:55 МСК
+    sched.add_job(
+        _safe_channel_stats_job, "cron",
+        hour=23, minute=55, id="channel_stats",
+    )
+    log.info("channel_stats job: 23:55 %s ежедневно", SCHEDULER_TZ)
+
     # auto-trade scan / tick jobs (Stage 7) — только если AUTO_TRADE_ENABLED=true
     try:
         from trading import TradingConfig as _TradingConfig
@@ -4901,6 +4908,26 @@ async def _safe_weekly_diary_job() -> None:
         await run_weekly_diary_now_cmd()
     except Exception as e:
         log.exception("weekly_diary job crashed: %s", e)
+
+
+async def _safe_channel_stats_job() -> None:
+    """rebranding-3: daily snapshot канала в state.channel_stats_log."""
+    try:
+        import subprocess
+        import sys as _sys
+        from pathlib import Path as _Path
+        script = _Path(__file__).resolve().parent / "scripts" / "channel_stats.py"
+        # subprocess чтобы изолировать aiogram Bot (мы внутри уже-запущенной loop)
+        result = subprocess.run(
+            [_sys.executable, str(script)],
+            capture_output=True, timeout=60, text=True, encoding="utf-8",
+        )
+        if result.returncode == 0:
+            log.info("channel_stats job: ok | %s", (result.stdout or "").strip().replace("\n", " | "))
+        else:
+            log.warning("channel_stats job: rc=%d | stderr=%s", result.returncode, result.stderr[:300])
+    except Exception as e:
+        log.exception("channel_stats job crashed: %s", e)
 
 
 async def run_news_drafts_cmd() -> None:
