@@ -153,11 +153,36 @@ def get_mistake_report() -> str:
         return f"Ошибка: {html_lib.escape(str(e))}"
 
 
+def get_engagement_report() -> str:
+    """Топ-5 постов по реакциям из state.json.post_engagement."""
+    try:
+        from core.json_store import load_json
+        from core.post_engagement import top_posts_by_engagement, total_reaction_count
+        state = load_json(ROOT / "state.json", default={}, expected_type=dict)
+        engagement = state.get("post_engagement") or {}
+        total = total_reaction_count(engagement)
+        if total == 0:
+            return "Реакций пока не зафиксировано (бот должен быть admin канала и polling должен включать message_reaction)."
+        top = top_posts_by_engagement(engagement, limit=5)
+        lines = [f"Всего реакций: {total} · отслеживается {len(engagement)} постов", ""]
+        for i, (key, entry, score) in enumerate(top, 1):
+            msg_id = entry.get("message_id", "?")
+            reactions = entry.get("reactions") or {}
+            top_emoji = sorted(reactions.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            emoji_str = " ".join(f"{e}×{c}" for e, c in top_emoji)
+            updated = entry.get("last_updated_at", "")[:16].replace("T", " ")
+            lines.append(f"{i}. msg #{msg_id} — {score} реакций ({emoji_str}) [{updated}]")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Ошибка: {html_lib.escape(str(e))}"
+
+
 # ================== Главная страница ==================
 @app.get("/admin", response_class=HTMLResponse)
 async def dashboard(request: Request, auth=Depends(authenticate)):
     content_mix_html = get_content_mix_html()
     mistake_report = get_mistake_report()
+    engagement_report = get_engagement_report()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     csrf_token = request.cookies.get(CSRF_COOKIE) or _new_csrf_token()
@@ -190,6 +215,11 @@ async def dashboard(request: Request, auth=Depends(authenticate)):
     <div class="card">
         <h3>🧠 Mistake Tracker — еженедельный отчёт</h3>
         <pre>{html_lib.escape(mistake_report)}</pre>
+    </div>
+
+    <div class="card">
+        <h3>💬 Engagement — топ постов по реакциям</h3>
+        <pre>{html_lib.escape(engagement_report)}</pre>
     </div>
 
     <div class="card">

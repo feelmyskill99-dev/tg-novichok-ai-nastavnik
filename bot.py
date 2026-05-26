@@ -41,6 +41,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     CallbackQuery,
+    MessageReactionUpdated,
 )
 
 
@@ -1586,6 +1587,7 @@ async def run_scheduler_forever() -> None:
     _register_author_note_callbacks(dp)
     _register_weekly_diary_callbacks(dp)
     _register_trade_visual_handlers(dp)
+    _register_reaction_handlers(dp)
     dp_bot = Bot(token=TELEGRAM_TOKEN, session=_ThreadedResolverSession())
     polling_task: asyncio.Task | None = None
 
@@ -1602,7 +1604,10 @@ async def run_scheduler_forever() -> None:
         else:
             # запускаем polling в отдельной таске, и сидим в idle-loop
             polling_task = asyncio.create_task(
-                dp.start_polling(dp_bot, allowed_updates=["callback_query", "message"])
+                dp.start_polling(
+                    dp_bot,
+                    allowed_updates=["callback_query", "message", "message_reaction"],
+                )
             )
             log.info("Telegram Dispatcher polling started (для confirm-mode кнопок)")
             while True:
@@ -3202,6 +3207,62 @@ def _publish_guard_reasons() -> list[str]:
     if not CHANNEL_ID:
         reasons.append("CHANNEL_ID не задан в .env.")
     return reasons
+
+
+def _register_reaction_handlers(dp: Dispatcher) -> None:
+    """Принимает MessageReactionUpdated events из канала и обновляет
+    state.post_engagement через core.post_engagement.apply_reaction_update.
+
+    Чтобы работало:
+    - Бот должен быть admin канала (с can_post_messages достаточно).
+    - В start_polling allowed_updates обязательно содержит "message_reaction".
+
+    Анонимные реакции каналов TG не передают user_id, поэтому мы агрегируем
+    diff (old_reaction → new_reaction) и хранится только distribution
+    emoji → count, без идентификации авторов.
+    """
+    from core.post_engagement import apply_reaction_update, evict_old_entries
+
+    @dp.message_reaction()
+    async def on_reaction(event: MessageReactionUpdated):
+        try:
+            # фильтр: только реакции в нашем канале (если CHANNEL_ID задан)
+            if CHANNEL_ID:
+                chan_id_str = str(CHANNEL_ID).lstrip("@")
+                event_chat = event.chat
+                # CHANNEL_ID может быть как @username, так и -100... numeric
+                if str(event_chat.id) != str(CHANNEL_ID) and event_chat.username != chan_id_str:
+                    return
+
+            old_emojis = [r.emoji for r in (event.old_reaction or [])
+                          if getattr(r, "emoji", None)]
+            new_emojis = [r.emoji for r in (event.new_reaction or [])
+                          if getattr(r, "emoji", None)]
+            if not old_emojis and not new_emojis:
+                return
+
+            def _mutate(state: dict) -> dict:
+                eng = state.get("post_engagement") or {}
+                if not isinstance(eng, dict):
+                    eng = {}
+                apply_reaction_update(
+                    eng,
+                    chat_id=event.chat.id,
+                    message_id=event.message_id,
+                    old_emojis=old_emojis,
+                    new_emojis=new_emojis,
+                )
+                eng = evict_old_entries(eng)
+                state["post_engagement"] = eng
+                return state
+
+            update_json(STATE_FILE, _mutate, default={}, expected_type=dict)
+            log.info(
+                "reaction: chat=%s msg=%s old=%s new=%s",
+                event.chat.id, event.message_id, old_emojis, new_emojis,
+            )
+        except Exception as e:
+            log.warning("reaction handler error: %s", e)
 
 
 def _register_news_callbacks(dp: Dispatcher) -> None:
