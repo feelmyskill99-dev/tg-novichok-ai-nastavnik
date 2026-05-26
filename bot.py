@@ -942,6 +942,7 @@ def build_post_html(
         payload.get("hashtags") or [],
         post_type=post_type,
         has_hamster=bool(hamster),
+        day_seed=date.today(),
     )
     parts.append("")
     parts.append(" ".join(esc(t) for t in all_tags))
@@ -1020,6 +1021,7 @@ def _build_post_html_raw(
         payload.get("hashtags") or [],
         post_type=post_type,
         has_hamster=bool(hamster),
+        day_seed=date.today(),
     )
     parts += ["", " ".join(esc(t) for t in all_tags)]
     text = "\n".join(parts).strip()

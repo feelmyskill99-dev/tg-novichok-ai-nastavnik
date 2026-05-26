@@ -112,3 +112,59 @@ def test_merge_tags_empty_claude_tags():
 def test_merge_tags_none_claude_tags():
     tags = merge_tags(None, post_type="market", has_hamster=False)
     assert "#честный_путь" in tags
+
+
+# ---------- rotation (rebranding-1.3) ----------
+
+
+def test_anchor_tag_always_present_with_seed():
+    """#честный_путь — всегда есть, даже при ротации."""
+    from datetime import date, timedelta
+    start = date(2026, 5, 1)
+    for i in range(30):
+        tags = system_tags_for("market", has_hamster=True, day_seed=start + timedelta(days=i))
+        assert "#честный_путь" in tags
+
+
+def test_secondary_tag_rotates_across_week_with_hamster():
+    """Вторичный тег покрывает ≥3 разных значения за 7 дней."""
+    from datetime import date, timedelta
+    start = date(2026, 5, 1)
+    seen = set()
+    for i in range(7):
+        tags = system_tags_for("market", has_hamster=True, day_seed=start + timedelta(days=i))
+        secondary = [t for t in tags if t != "#честный_путь"][:1]
+        seen.update(secondary)
+    assert len(seen) >= 3, f"expected ≥3 variants across 7 days, got {seen}"
+
+
+def test_secondary_tag_rotates_across_week_no_hamster():
+    from datetime import date, timedelta
+    start = date(2026, 5, 1)
+    seen = set()
+    for i in range(7):
+        tags = system_tags_for("market", has_hamster=False, day_seed=start + timedelta(days=i))
+        secondary = [t for t in tags if t != "#честный_путь"][:1]
+        seen.update(secondary)
+    assert len(seen) >= 3
+
+
+def test_education_keeps_termin_tag_with_seed():
+    from datetime import date
+    tags = system_tags_for("fallback_education", has_hamster=False, day_seed=date(2026, 5, 26))
+    assert "#термин_без_боли" in tags
+    assert "#честный_путь" in tags
+
+
+def test_flash_keeps_flash_tag_with_seed():
+    from datetime import date
+    tags = system_tags_for("flash", has_hamster=True, day_seed=date(2026, 5, 26))
+    assert "#flash" in tags
+
+
+def test_merge_tags_with_seed_rotates():
+    from datetime import date
+    a = merge_tags(["btc"], post_type="market", has_hamster=True, day_seed=date(2026, 5, 1))
+    b = merge_tags(["btc"], post_type="market", has_hamster=True, day_seed=date(2026, 5, 2))
+    # хотя бы один из тегов отличается между двумя днями
+    assert set(a) != set(b)
