@@ -4169,33 +4169,29 @@ async def _news_preview_send(
     image_path: Optional[str] = None,
     meta: Optional[dict] = None,
 ) -> None:
-    """Stage 14 — превью владельцу: header + (опц.guard) + сам пост с кнопками.
+    """Превью владельцу одним сообщением: header-чип + сам пост с кнопками.
 
-    Полученный пост шлётся точно как в канал (photo+caption или text-only).
-    Header и guard идут отдельными короткими сообщениями ДО поста, чтобы
-    визуально не загрязнять сам пост.
+    Header (draft_id · impact · sector · tone) встраивается в верх caption'а
+    через <i>...</i> — Telegram рендерит его серой строкой над постом. Если
+    image+caption превысит 1024 — fallback: header отдельным мини-сообщением.
+
+    Guard-блок (редкий случай, только если publish-guard сработал) шлётся
+    отдельно перед постом — там можно увидеть несколько причин в виде списка.
     """
     if not OWNER_CHAT_ID:
         log.warning("news preview: OWNER_CHAT_ID не задан, skip")
         return
 
+    header_text = ""
     if meta:
         draft_id = str(meta.get("draft_id") or "")[:8]
         sector = str(meta.get("sector") or "-")
         impact = int(meta.get("impact") or 0)
         tone = str(meta.get("tone") or "-")
         header_text = (
-            f"🧪 Превью #{html.escape(draft_id)} · "
-            f"sector={html.escape(sector)} · impact={impact} · tone={html.escape(tone)}"
+            f"<i>🧪 #{html.escape(draft_id)} · impact {impact} · "
+            f"{html.escape(sector)} · {html.escape(tone)}</i>"
         )
-        try:
-            await bot.send_message(
-                OWNER_CHAT_ID, header_text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            log.warning("news preview header send failed: %s", e)
 
         guard_reasons = list(meta.get("guard_reasons") or [])
         if guard_reasons:
@@ -4211,8 +4207,27 @@ async def _news_preview_send(
             except Exception as e:
                 log.warning("news preview guard send failed: %s", e)
 
+    # Готовим итоговый текст: header сверху + пустая строка + пост.
+    if header_text:
+        combined = f"{header_text}\n\n{text}"
+    else:
+        combined = text
+
+    # Caption-fit: если фото есть и итог > 1024 — fallback на старый путь (header отдельно).
+    PHOTO_CAPTION_LIMIT = 1024
+    if header_text and image_path and len(combined) > PHOTO_CAPTION_LIMIT:
+        try:
+            await bot.send_message(
+                OWNER_CHAT_ID, header_text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            log.warning("news preview header (fallback) send failed: %s", e)
+        combined = text  # сам пост уходит без вшитого header'а
+
     await send_post_with_optional_image(
-        bot, OWNER_CHAT_ID, text, image_path,
+        bot, OWNER_CHAT_ID, combined, image_path,
         reply_markup=_keyboard_from_dict(kb_dict) if kb_dict else None,
     )
 
