@@ -131,3 +131,33 @@ def append_event(
         log_list = []
     log_list.append(event)
     state["content_mix_log"] = prune_log(log_list, now=now, days=days, cap=cap)
+
+
+def append_channel_stats(
+    state_path,
+    stats: dict,
+    *,
+    max_entries: int = 100,
+) -> None:
+    """Атомарно дописать запись в state.channel_stats_log[]. Stage rebranding-3.
+
+    Принимает путь к state.json (а не state-dict), сама делает load → mutate → save
+    под json_store lock. `recorded_at` (ISO UTC) добавляется автоматически если в stats его нет.
+    Список обрезается до max_entries (старые удаляются с начала).
+    """
+    from .json_store import update_json
+
+    entry = dict(stats)
+    entry.setdefault("recorded_at", _now().isoformat(timespec="seconds"))
+
+    def _mutate(state: dict) -> dict:
+        log_list = state.get("channel_stats_log") or []
+        if not isinstance(log_list, list):
+            log_list = []
+        log_list.append(entry)
+        if len(log_list) > max_entries:
+            log_list = log_list[-max_entries:]
+        state["channel_stats_log"] = log_list
+        return state
+
+    update_json(state_path, default={}, expected_type=dict, mutator=_mutate)
