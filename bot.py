@@ -21,7 +21,7 @@ import asyncio
 import logging
 import argparse
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -201,12 +201,7 @@ POST_EVENING_HOUR  = _env_int("POST_EVENING_HOUR", 19)
 if not CHANNEL_ID and not DRY_RUN:
     DRY_RUN = True
 
-DISCLAIMER = (
-    "Не является финансовым советом. Это личный дневник обучения, "
-    "а AI-анализ носит ознакомительный характер."
-)
-# Stage 9: короткий дисклеймер для обычных постов (длинный — только в закрепе и больших гайдах).
-DISCLAIMER_SHORT = "Не финсовет. Это дневник обучения и AI-разбор."
+from core.disclaimer import DISCLAIMER_LONG as DISCLAIMER, pick_disclaimer
 
 FALLBACK_TOPICS = [
     "риск-менеджмент: почему 95% новичков сливают в первые месяцы",
@@ -940,7 +935,7 @@ def build_post_html(
 
     parts.append("")
     # Stage 9: короткий дисклеймер в обычных постах. Длинный — для закрепа/гайдов.
-    disclaimer_text = DISCLAIMER if post_type == "fallback_education" else DISCLAIMER_SHORT
+    disclaimer_text = pick_disclaimer(post_type, day_seed=date.today())
     parts.append("<i>" + esc(disclaimer_text) + "</i>")
 
     all_tags = _merge_post_tags(
@@ -1019,7 +1014,7 @@ def _build_post_html_raw(
         hook = PARTNER_HOOKS[post_num % len(PARTNER_HOOKS)]
         parts += ["", hook.format(url=esc(PARTNER_URL))]
     parts.append("")
-    disclaimer_text = DISCLAIMER if post_type == "fallback_education" else DISCLAIMER_SHORT
+    disclaimer_text = pick_disclaimer(post_type, day_seed=date.today())
     parts.append("<i>" + esc(disclaimer_text) + "</i>")
     all_tags = _merge_post_tags(
         payload.get("hashtags") or [],
@@ -1838,7 +1833,7 @@ async def _maybe_send_trade_visual(
             f"<b>{head_emoji} {head}</b>\n"
             + build_trade_summary_card(payload)
             + (f"\n\n<code>{html.escape(trade_id, quote=False)}</code>" if trade_id else "")
-            + "\n\n<i>Не финсовет. Это дневник обучения и AI-разбор.</i>"
+            + f"\n\n<i>{html.escape(pick_disclaimer('trade', day_seed=date.today()), quote=False)}</i>"
         )
         secondary_caption = (
             "📷 <b>Скрин Gate.io</b>\n"
