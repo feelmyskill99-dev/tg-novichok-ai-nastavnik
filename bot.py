@@ -1588,6 +1588,10 @@ async def run_scheduler_forever() -> None:
     dp_bot = Bot(token=TELEGRAM_TOKEN, session=_ThreadedResolverSession())
     polling_task: asyncio.Task | None = None
 
+    # rebranding-4: catchup для pending news drafts при старте — отправляем свежие
+    # callback-кнопки взамен старых (старые мертвы, если бот был оффлайн в момент нажатия).
+    asyncio.create_task(_safe_news_catchup_job(publisher.bot))
+
     try:
         if ENABLE_WEBHOOK:
             log.info("webhook listening on %s:%d", WEBHOOK_HOST, WEBHOOK_PORT)
@@ -4928,6 +4932,77 @@ async def _safe_channel_stats_job() -> None:
             log.warning("channel_stats job: rc=%d | stderr=%s", result.returncode, result.stderr[:300])
     except Exception as e:
         log.exception("channel_stats job crashed: %s", e)
+
+
+async def _safe_news_catchup_job(bot: Bot) -> None:
+    """rebranding-4: при старте бота отправить владельцу свежие callback-кнопки
+    для всех pending_review news drafts. Чинит ситуацию когда старые кнопки
+    мертвы из-за того что бот был оффлайн в момент нажатия.
+
+    Идемпотентность: state.json.news_catchup_sent_ids хранит set отправленных
+    draft_id, чтобы не спамить владельца при каждом перезапуске.
+    """
+    try:
+        if not OWNER_CHAT_ID:
+            return
+        from news import DraftStore, review_keyboard
+        from core.json_store import update_json
+        store = DraftStore(NEWS_DRAFTS_FILE)
+        pending = store.list_pending()
+        if not pending:
+            log.info("news catchup: 0 pending drafts")
+            return
+
+        state_path = ROOT / "state.json"
+        sent_ids: set[str] = set()
+
+        def _read_sent(s: dict) -> dict:
+            nonlocal sent_ids
+            sent_ids = set(s.get("news_catchup_sent_ids") or [])
+            return s
+
+        update_json(state_path, default={}, expected_type=dict, mutator=_read_sent)
+
+        fresh = [d for d in pending if d.draft_id not in sent_ids]
+        if not fresh:
+            log.info("news catchup: %d pending, все уже отправлены ранее", len(pending))
+            return
+
+        log.info("news catchup: %d pending, %d свежих к отправке", len(pending), len(fresh))
+        sent_now: list[str] = []
+        for draft in fresh:
+            try:
+                sn = draft.source_news or {}
+                sector = (sn.get("sector") or "-")
+                impact = int(sn.get("impact_score") or 0)
+                title = (sn.get("title") or "")[:140]
+                summary = (
+                    f"🔁 <b>Catchup news draft</b>\n"
+                    f"draft_id: <code>{html.escape(draft.draft_id, quote=False)}</code>\n"
+                    f"sector: {html.escape(sector, quote=False)} | impact: {impact} | rev: {draft.revision_count}\n"
+                    f"title: {html.escape(title, quote=False)}\n"
+                    f"\n<i>Старые кнопки могли устареть. Эти — свежие.</i>"
+                )
+                await bot.send_message(
+                    OWNER_CHAT_ID, summary,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_keyboard_from_dict(review_keyboard(draft.draft_id)),
+                )
+                sent_now.append(draft.draft_id)
+            except Exception as e:
+                log.warning("news catchup: send для draft_id=%s упал: %s", draft.draft_id, e)
+
+        if sent_now:
+            def _save_sent(s: dict) -> dict:
+                cur = set(s.get("news_catchup_sent_ids") or [])
+                cur.update(sent_now)
+                # ограничим до 200 последних чтобы не разрастался
+                s["news_catchup_sent_ids"] = list(cur)[-200:]
+                return s
+            update_json(state_path, default={}, expected_type=dict, mutator=_save_sent)
+            log.info("news catchup: отправил %d, сохранил в state", len(sent_now))
+    except Exception as e:
+        log.exception("news catchup job crashed: %s", e)
 
 
 async def run_news_drafts_cmd() -> None:
