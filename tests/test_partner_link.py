@@ -63,6 +63,17 @@ def test_default_post_type_is_post():
     assert qs["utm_medium"] == "post"
 
 
+def test_partner_hooks_constant_is_non_empty_list_of_templates():
+    """PARTNER_HOOKS — список форматных строк с {url} плейсхолдером.
+    Используется build_post_html в bot.py для ротации подводки."""
+    from core.partner_link import PARTNER_HOOKS
+    assert isinstance(PARTNER_HOOKS, list)
+    assert len(PARTNER_HOOKS) >= 2   # минимум 2 чтобы была какая-то ротация
+    for hook in PARTNER_HOOKS:
+        assert isinstance(hook, str)
+        assert "{url}" in hook, f"hook без плейсхолдера {{url}}: {hook!r}"
+
+
 def test_handles_url_with_path_and_fragment():
     """Path и fragment не теряются."""
     out = build_partner_url(

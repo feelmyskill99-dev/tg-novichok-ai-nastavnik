@@ -6,6 +6,10 @@ utm_content=<post_id>. Так в Gate.io можно понимать какой 
 конвертит лучше.
 
 Сохраняет уже существующие query-параметры PARTNER_URL (например, ref-id).
+
+PARTNER_HOOKS — список fraz, в которые вставляется ссылка. Ротируется
+по индексу post_num в bot.build_post_html, чтобы не вылезала одна и та
+же подводка трижды в день.
 """
 
 from __future__ import annotations
@@ -14,6 +18,12 @@ from urllib.parse import urlencode, urlparse, urlunparse, parse_qsl
 
 
 UTM_SOURCE = "tg_ai_deposit"
+
+PARTNER_HOOKS = [
+    'Графики и сделки разбираю через биржу, где сам учусь: <a href="{url}">площадка</a>',
+    'Я тестирую инструменты здесь: <a href="{url}">площадка</a>',
+    'Где смотрю фандинг и OHLCV: <a href="{url}">площадка</a>',
+]
 
 
 def build_partner_url(
