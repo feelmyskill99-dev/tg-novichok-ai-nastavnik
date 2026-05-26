@@ -25,6 +25,21 @@ from core.content_mix_writer import append_channel_stats  # noqa: E402
 
 STATE_PATH = ROOT / "state.json"
 
+PENDING_STATUSES = ("pending_review", "revised")
+
+
+def count_pending(items) -> int:
+    """Counts drafts with status in PENDING_STATUSES.
+
+    Корректно обрабатывает: не-list, элементы не-dict, отсутствие ключа status.
+    """
+    if not isinstance(items, list):
+        return 0
+    return sum(
+        1 for d in items
+        if isinstance(d, dict) and d.get("status") in PENDING_STATUSES
+    )
+
 
 class _ThreadedResolverSession(AiohttpSession):
     def __init__(self, *args, **kwargs):
@@ -83,9 +98,9 @@ async def _collect_stats(token: str, channel_id: str) -> dict:
     author_notes = load_json(ROOT / "author_notes_drafts.json", default=[], expected_type=list)
     weekly_diary = load_json(ROOT / "weekly_diary_drafts.json", default=[], expected_type=list)
     stats["pending_drafts"] = {
-        "news": len(news_drafts) if isinstance(news_drafts, list) else 0,
-        "author_notes": len(author_notes) if isinstance(author_notes, list) else 0,
-        "weekly_diary": len(weekly_diary) if isinstance(weekly_diary, list) else 0,
+        "news": count_pending(news_drafts),
+        "author_notes": count_pending(author_notes),
+        "weekly_diary": count_pending(weekly_diary),
     }
 
     confirm_trades = load_json(ROOT / "confirm_trades.json", default={}, expected_type=dict)
