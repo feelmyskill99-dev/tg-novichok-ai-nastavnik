@@ -91,6 +91,54 @@ SECTOR_TONE_MAP: dict[str, list[str]] = {
     "ai_crypto":                    ["calm"],
 }
 
+# Stage 14e — флаг страны перед title_emoji (как у @markettwits).
+# Срабатывает по ключевым словам в title/lead/source_news.title. Если несколько
+# стран — берём первую найденную (порядок словаря важен — США/РФ первыми, чтобы
+# не теряться на «Trump в Иране» = США).
+COUNTRY_FLAGS: dict[str, tuple[str, ...]] = {
+    "🇺🇸": ("trump", "biden", "powell", "сша", "u.s.", "united states", "fed", "фрс",
+            "white house", "белый дом", "sec ", "cftc", "senate", "сенат", "congress",
+            "nasdaq", "s&p", "nyse"),
+    "🇷🇺": ("россия", "рф ", " рф", "путин", "цб рф", "минфин", "минцифр", "сбер",
+            "russia", "moscow", "москв"),
+    "🇨🇳": ("china", "китай", "pboc", "yuan", "юань", "shanghai", "shenzhen"),
+    "🇪🇺": ("eu ", "european", "европ", "ecb", "ецб", "mica", "brussels", "брюссель", "euro "),
+    "🇩🇪": ("germany", "германи", "bafin", "berlin", "берлин"),
+    "🇬🇧": ("uk ", "britain", "британ", "london", "лондон", "fca"),
+    "🇯🇵": ("japan", "японск", "японии", "yen", "иен"),
+    "🇰🇷": ("south korea", "корея", "korean", "seoul", "сеул"),
+    "🇮🇷": ("iran", "иран", "tehran", "тегеран"),
+    "🇮🇱": ("israel", "израиль"),
+    "🇮🇳": ("india", "индия", "indian"),
+    "🇸🇻": ("salvador", "сальвадор"),
+    "🇸🇬": ("singapore", "сингапур"),
+    "🇦🇪": ("uae", "emirates", "оаэ", "dubai", "дубай"),
+    "🇹🇷": ("turkey", "турц"),
+    "🇧🇷": ("brazil", "брази"),
+    "🇲🇽": ("mexico", "мексик"),
+    "🇨🇦": ("canada", "канад"),
+    "🇦🇺": ("australia", "австралия"),
+    "🇨🇭": ("switzerland", "швейцар"),
+    "🇺🇦": ("ukraine", "украин"),
+}
+
+
+def detect_country_flag(*texts: str) -> str:
+    """Stage 14e — найти флаг страны по тексту title/lead/source.
+
+    Берём первый матч по словарю COUNTRY_FLAGS. Регистронезависимо.
+    Возвращаем emoji или "" если страна не определена.
+    """
+    combined = " ".join(str(t or "") for t in texts).lower()
+    if not combined:
+        return ""
+    for flag, keywords in COUNTRY_FLAGS.items():
+        for kw in keywords:
+            if kw in combined:
+                return flag
+    return ""
+
+
 # Stage 14 — эмодзи-фолбэк по сектору (когда Claude не вернул title_emoji).
 SECTOR_EMOJI_FALLBACK: dict[str, str] = {
     "security_hacks_scams":         "🤝",
@@ -529,8 +577,15 @@ def build_html_v2(payload: dict, item: "NewsItem") -> str:
     if not emoji:
         emoji = SECTOR_EMOJI_FALLBACK.get(sector, "🗒️")
 
+    # Stage 14e — флаг страны слева от sector emoji (по примеру @markettwits).
+    # Берём по самому надёжному источнику: исходный title новости + Claude lead.
+    country_flag = detect_country_flag(
+        item.title, item.summary, payload.get("specific_title"), payload.get("lead"),
+    )
+    title_prefix = f"{country_flag}{emoji}" if country_flag else emoji
+
     specific_title = _e(payload.get("specific_title") or "").strip()
-    title_line = f"{emoji} <b>{specific_title}</b>" if specific_title else neutral_sector_header(sector)
+    title_line = f"{title_prefix} <b>{specific_title}</b>" if specific_title else neutral_sector_header(sector)
 
     lead = _e(payload.get("lead") or "").strip()
 
