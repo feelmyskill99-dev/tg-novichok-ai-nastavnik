@@ -101,6 +101,7 @@ def build_morning_briefing_html(
     partner_url: str = "",
     bot_username: str = "",
     channel_id_for_links: str = "",
+    poll_block: str = "",
     caption_limit: int = CAPTION_LIMIT,
 ) -> str:
     """Собрать HTML утреннего брифинга.
@@ -111,8 +112,13 @@ def build_morning_briefing_html(
     fg_index: F&G value 0-100 или None
     partner_url: уже с UTM (caller строит через build_partner_url)
     bot_username: для CTA «пиши в @bot_username»
+    poll_block: Stage 14f — готовый HTML reaction-опроса (см.
+        core.reaction_poll.build_poll_block). Если пустой — секция не
+        рендерится. Если не влезает в caption — сначала сжимаем
+        количество новостей, потом убираем опрос.
 
-    Если caption > caption_limit — режем top_news до 3, потом до 1.
+    Если caption > caption_limit — режем top_news до 3, потом до 1,
+    потом убираем poll_block.
     """
     symbol = (market_snapshot.get("symbol") or "BTC/USDT").split("/")[0] or "BTC"
     price = market_snapshot.get("price")
@@ -150,7 +156,7 @@ def build_morning_briefing_html(
             f'Я торгую здесь → Gate.io</a></b>'
         )
 
-    def _assemble(news_n: int) -> str:
+    def _assemble(news_n: int, include_poll: bool) -> str:
         news = (top_news or [])[:news_n]
         bullets = [_format_news_bullet(n, channel_id_for_links) for n in news]
 
@@ -162,6 +168,9 @@ def build_morning_briefing_html(
             parts.append("📊 <b>Главное за ночь:</b>")
             parts.append("")
             parts.extend(bullets)
+        if include_poll and poll_block:
+            parts.append("")
+            parts.append(poll_block)
         if bot_cta:
             parts.append("")
             parts.append(bot_cta)
@@ -170,16 +179,26 @@ def build_morning_briefing_html(
             parts.append(partner_cta)
         return "\n".join(parts)
 
-    # Cascade: 5 → 3 → 1 → 0, пока влезает в caption_limit.
-    for n in (news_count_max, 3, 1, 0):
+    # Cascade: (5, poll) → (3, poll) → (1, poll) → (5, no_poll) → (3, no_poll) → (1, no_poll) → (0, no_poll)
+    plans: list[tuple[int, bool]] = []
+    if poll_block:
+        plans += [(news_count_max, True), (3, True), (1, True)]
+    plans += [(news_count_max, False), (3, False), (1, False), (0, False)]
+
+    seen: set[tuple[int, bool]] = set()
+    for n, with_poll in plans:
         if n > news_count_max:
+            n = news_count_max
+        key = (n, with_poll)
+        if key in seen:
             continue
-        text = _assemble(n)
+        seen.add(key)
+        text = _assemble(n, with_poll)
         if len(text) <= caption_limit:
             return text
 
-    # Если даже 0 новостей не влезает (теоретически не должно) — режем CTA.
-    return _assemble(0)[:caption_limit]
+    # Если даже минимальный вариант не влезает (теоретически не должно) — обрезаем.
+    return _assemble(0, False)[:caption_limit]
 
 
 def fetch_top_news_for_briefing(
