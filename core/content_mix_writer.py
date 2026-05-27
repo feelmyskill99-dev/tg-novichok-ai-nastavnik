@@ -72,11 +72,18 @@ def make_event(
     published_to: str,
     title: str = "",
     source: str = "",
+    message_id: Optional[int] = None,
     now: Optional[datetime] = None,
 ) -> dict:
-    """Построить одно событие content_mix_log."""
+    """Построить одно событие content_mix_log.
+
+    message_id — Stage 14d, опционально. Если задан, в записи появится поле,
+    позволяющее строить t.me/<chan>/<id> ссылки для daily-digest. Старые
+    записи без message_id остаются валидны (рендер дайджеста skips их или
+    показывает без ссылки).
+    """
     now = now or _now()
-    return {
+    event = {
         "timestamp": now.isoformat(timespec="seconds"),
         "post_type": post_type or "",
         "category": category_for(post_type),
@@ -84,6 +91,12 @@ def make_event(
         "title": (title or "")[:240],
         "source": source or "",
     }
+    if message_id is not None:
+        try:
+            event["message_id"] = int(message_id)
+        except (TypeError, ValueError):
+            pass
+    return event
 
 
 def prune_log(

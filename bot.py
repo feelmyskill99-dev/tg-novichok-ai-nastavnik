@@ -307,11 +307,14 @@ def _log_post_event(
     published_to: str,
     title: str = "",
     source: str = "",
+    message_id: int | None = None,
 ) -> None:
     """Записать событие публикации (owner-preview или channel-publish).
 
     post_type — сырой тип (market / flash / news / scam_radar / author_note / trade ...).
     published_to — 'owner' | 'channel'.
+    message_id — Stage 14d, опционально: TG message_id опубликованного поста
+    в канале, чтобы daily-digest мог строить ссылки.
     """
     if published_to not in ("owner", "channel"):
         log.warning("content_mix: bad published_to=%r, skip", published_to)
@@ -319,6 +322,7 @@ def _log_post_event(
     s = load_state()
     event = _cmw_make_event(
         post_type, published_to=published_to, title=title, source=source,
+        message_id=message_id,
     )
     _cmw_append_event(s, event)
     save_state(s)
@@ -1352,6 +1356,44 @@ async def _safe_mistake_report_job(bot: Bot, tracker: MistakeTracker):
     except Exception as e:
         log.exception("Mistake report failed: %s", e)
 
+
+async def _safe_daily_digest_job(bot: Bot) -> None:
+    """Stage 14d — публикует «ТОП ДНЯ» в канал в 21:00 МСК.
+
+    Берёт content_mix_log за сегодня (published_to=channel), собирает HTML
+    через core.daily_digest.build_digest_html. Если постов < 3 — тихо ничего
+    не делает (нет смысла в пустом дайджесте).
+    """
+    try:
+        if not CHANNEL_ID:
+            return
+        from core.daily_digest import build_digest_html
+        state = load_state()
+        log_list = state.get("content_mix_log") or []
+        html_text = build_digest_html(
+            log_list,
+            channel_id_for_links=CHANNEL_ID,
+        )
+        if not html_text:
+            log.info("daily_digest: skip (мало постов сегодня)")
+            return
+        msg = await bot.send_message(
+            CHANNEL_ID, html_text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        try:
+            _log_post_event(
+                "daily_digest", published_to="channel",
+                title="ТОП ДНЯ", source="scheduled_digest",
+                message_id=msg.message_id if msg else None,
+            )
+        except Exception:
+            pass
+        log.info("daily_digest: published to %s", CHANNEL_ID)
+    except Exception as e:
+        log.exception("daily_digest failed: %s", e)
+
 async def run_scheduler_forever() -> None:
     global styleguard, mistake_tracker
 
@@ -1399,6 +1441,18 @@ async def run_scheduler_forever() -> None:
         day_of_week="sun", hour=12, minute=0,
         args=[publisher.bot, mistake_tracker],
         misfire_grace_time=SCHED_GRACE_S, coalesce=True,
+    )
+
+    # Stage 14d — «ТОП ДНЯ» дайджест ежедневно в 21:00 МСК (или ENV DIGEST_HOUR).
+    # Собирает все сегодняшние published_to=channel посты в один сводный пост
+    # со ссылками. Если постов < 3 — тихо skip.
+    _digest_hour = _env_int("DIGEST_HOUR", 21)
+    sched.add_job(
+        _safe_daily_digest_job, "cron",
+        hour=_digest_hour, minute=0,
+        args=[publisher.bot],
+        misfire_grace_time=SCHED_GRACE_S, coalesce=True,
+        id="daily_digest",
     )
 
     # news scan job — включается только если ENABLE_NEWS=true в .env

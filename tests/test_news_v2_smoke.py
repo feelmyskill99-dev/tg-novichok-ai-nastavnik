@@ -62,18 +62,29 @@ def test_merge_hashtags_no_rubric_no_assets():
     assert result == ["#xyz", "#abc"]
 
 
-def test_merge_hashtags_ignores_non_btc_eth_assets():
-    """Только BTC/ETH из первых двух assets идут в хэштеги."""
-    # assets[:2] = ["DOGE", "PEPE"] — оба не BTC/ETH, не попадают.
-    # BTC в третьей позиции отбрасывается (берём только assets[:2]).
+def test_merge_hashtags_ticker_whitelist_known_assets():
+    """Stage 14c: asset-тикеры из whitelist первых двух assets попадают
+    в хэштеги (раньше — только BTC/ETH, теперь 25 крупных)."""
+    # DOGE и PEPE теперь в whitelist
     result = merge_hashtags(
         claude_tags=["#meme"],
         sector="memecoins_low_priority",
         assets=["DOGE", "PEPE", "BTC"],
     )
-    assert "#DOGE" not in result
-    assert "#PEPE" not in result
+    assert "#DOGE" in result
+    assert "#PEPE" in result
     assert "#BTC" not in result  # BTC за пределами assets[:2]
+
+
+def test_merge_hashtags_ignores_unknown_assets():
+    """Тикеры вне whitelist (например, NEWCOIN123) НЕ попадают как хэштеги."""
+    result = merge_hashtags(
+        claude_tags=["#smth"],
+        sector="memecoins_low_priority",
+        assets=["NEWCOIN123", "WTF"],
+    )
+    assert "#NEWCOIN123" not in result
+    assert "#WTF" not in result
 
 
 def test_merge_hashtags_btc_in_first_two_added():
@@ -84,7 +95,8 @@ def test_merge_hashtags_btc_in_first_two_added():
         assets=["BTC", "DOGE"],
     )
     assert "#BTC" in result
-    assert "#DOGE" not in result
+    # DOGE теперь тоже в whitelist (Stage 14c)
+    assert "#DOGE" in result
 
 
 # --- normalize_payload_v2 -------------------------------------------------
