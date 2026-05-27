@@ -166,3 +166,31 @@ class NewsDeduplicator:
                 continue
             count += 1
         return count
+
+    def posted_today_in_sector(self, sector: str, *, only_channel: bool = False) -> int:
+        """Сколько постов конкретного sector'а уже ушло сегодня (UTC).
+
+        Защищает от перекоса в один день (27.04: 4 stablecoin-поста подряд).
+        """
+        if not sector:
+            return 0
+        records = self._load()
+        today = datetime.now(tz=timezone.utc).date()
+        count = 0
+        for rec in records:
+            if rec.get("sector") != sector:
+                continue
+            try:
+                dt = dtparser.parse(rec.get("posted_at", ""))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if dt.date() != today:
+                continue
+            if only_channel and rec.get("decision") != "published_channel":
+                continue
+            if rec.get("decision") in ("skipped", "claude_rejected"):
+                continue
+            count += 1
+        return count

@@ -1004,6 +1004,17 @@ class NewsPublisher:
             channel_allowed = False
             log.info("news day limit reached (%d); routing draft to owner", today_count)
 
+        # Stage 14b — sector-перекос guard: не больше N постов одного sector'а в день.
+        sector_cap = getattr(self.cfg, "news_max_posts_per_sector_per_day", 0) or 0
+        if channel_allowed and sector_cap > 0 and item.sector:
+            sector_today = self.dedup.posted_today_in_sector(item.sector, only_channel=True)
+            if sector_today >= sector_cap:
+                channel_allowed = False
+                log.info(
+                    "news sector cap reached (%d/%d for %r); routing draft to owner",
+                    sector_today, sector_cap, item.sector,
+                )
+
         # Если можно прямо в канал — публикуем сразу.
         if channel_allowed:
             await self.send(self.channel_id, text, image_path)
