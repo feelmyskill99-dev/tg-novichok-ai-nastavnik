@@ -210,6 +210,7 @@ async def dashboard(request: Request, auth=Depends(authenticate)):
 <body>
 <div class="container">
     <h1>🧠 Пульт AI-Наставника</h1>
+    <p><a href="/admin/queue" style="color:#e94560">📥 Очередь черновиков (review)</a></p>
     {content_mix_html}
 
     <div class="card">
@@ -314,6 +315,279 @@ async def force_post(
         return {"status": "ok", "detail": "Fallback message sent."}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+# ================== Bulk-review очереди ==================
+NEWS_DRAFTS_FILE = ROOT / "news_drafts.json"
+AUTHOR_NOTES_FILE = ROOT / "author_notes_drafts.json"
+
+
+def _list_pending_news() -> list:
+    try:
+        from news.drafts import DraftStore
+        return DraftStore(NEWS_DRAFTS_FILE).list_pending()
+    except Exception:
+        return []
+
+
+def _list_pending_author_notes() -> list:
+    try:
+        from author_notes import AuthorNoteStore
+        return AuthorNoteStore(AUTHOR_NOTES_FILE).list_pending()
+    except Exception:
+        return []
+
+
+def _reject_news_draft(draft_id: str) -> bool:
+    try:
+        from news.drafts import DraftStore
+        store = DraftStore(NEWS_DRAFTS_FILE)
+        d = store.get(draft_id)
+        if not d or d.status not in ("pending_review", "revised"):
+            return False
+        d.status = "rejected"
+        store.update(d)
+        return True
+    except Exception:
+        return False
+
+
+def _reject_author_note_draft(draft_id: str) -> bool:
+    try:
+        from author_notes import AuthorNoteStore
+        store = AuthorNoteStore(AUTHOR_NOTES_FILE)
+        d = store.get(draft_id)
+        if not d or d.status not in ("pending_review", "revised"):
+            return False
+        d.status = "rejected"
+        store.update(d)
+        return True
+    except Exception:
+        return False
+
+
+def _purge_older_than(days: int) -> dict:
+    """Reject все pending драфты старше N дней. Возвращает счётчики."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=max(1, days))
+    n_news = 0
+    n_notes = 0
+    try:
+        from news.drafts import DraftStore
+        store = DraftStore(NEWS_DRAFTS_FILE)
+        for d in store.list_pending():
+            try:
+                ts = datetime.fromisoformat(d.created_at.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts < cutoff:
+                d.status = "rejected"
+                store.update(d)
+                n_news += 1
+    except Exception:
+        pass
+    try:
+        from author_notes import AuthorNoteStore
+        store = AuthorNoteStore(AUTHOR_NOTES_FILE)
+        for d in store.list_pending():
+            try:
+                ts = datetime.fromisoformat(d.created_at.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if ts < cutoff:
+                d.status = "rejected"
+                store.update(d)
+                n_notes += 1
+    except Exception:
+        pass
+    return {"news": n_news, "author_notes": n_notes}
+
+
+def _render_news_row(d) -> str:
+    sn = d.source_news or {}
+    cj = d.claude_json or {}
+    title = html_lib.escape((cj.get("specific_title") or sn.get("title") or "(без заголовка)")[:120])
+    source = html_lib.escape((sn.get("source") or "")[:30])
+    sector = html_lib.escape((sn.get("sector") or "")[:20])
+    impact = sn.get("impact_score") or 0
+    created = html_lib.escape((d.created_at or "")[:16].replace("T", " "))
+    did = html_lib.escape(d.draft_id, quote=True)
+    return (
+        f'<tr>'
+        f'<td>{created}</td>'
+        f'<td>{source}</td>'
+        f'<td>{sector}</td>'
+        f'<td>{int(impact)}</td>'
+        f'<td style="text-align:left">{title}</td>'
+        f'<td><button type="button" onclick="rejectNews(\'{did}\')">❌</button></td>'
+        f'</tr>'
+    )
+
+
+def _render_note_row(d) -> str:
+    cj = d.claude_json or {}
+    rubric = html_lib.escape((d.rubric or "")[:30])
+    preview = html_lib.escape((cj.get("body") or cj.get("text") or "")[:100])
+    created = html_lib.escape((d.created_at or "")[:16].replace("T", " "))
+    did = html_lib.escape(d.draft_id, quote=True)
+    return (
+        f'<tr>'
+        f'<td>{created}</td>'
+        f'<td>{rubric}</td>'
+        f'<td style="text-align:left">{preview}</td>'
+        f'<td><button type="button" onclick="rejectNote(\'{did}\')">❌</button></td>'
+        f'</tr>'
+    )
+
+
+@app.get("/admin/queue", response_class=HTMLResponse)
+async def queue_page(request: Request, auth=Depends(authenticate)):
+    news_pending = _list_pending_news()
+    notes_pending = _list_pending_author_notes()
+    csrf_token = request.cookies.get(CSRF_COOKIE) or _new_csrf_token()
+
+    news_pending_sorted = sorted(
+        news_pending,
+        key=lambda d: float((d.source_news or {}).get("impact_score") or 0),
+        reverse=True,
+    )
+    notes_pending_sorted = sorted(notes_pending, key=lambda d: d.created_at or "", reverse=True)
+
+    news_rows = "".join(_render_news_row(d) for d in news_pending_sorted) or (
+        '<tr><td colspan="6" style="text-align:center; color:#888">Нет pending news</td></tr>'
+    )
+    notes_rows = "".join(_render_note_row(d) for d in notes_pending_sorted) or (
+        '<tr><td colspan="4" style="text-align:center; color:#888">Нет pending author notes</td></tr>'
+    )
+
+    page = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Очередь черновиков — AI Наставник</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    body {{ font-family: 'Segoe UI', sans-serif; margin: 2em; background: #1a1a2e; color: #eee; }}
+    .container {{ max-width: 1200px; margin: auto; }}
+    .card {{ background: #16213e; padding: 1em; border-radius: 8px; margin-bottom: 1em; }}
+    button {{ background: #e94560; color: white; border: none; padding: 0.4em 0.8em; border-radius: 5px; cursor: pointer; }}
+    button.danger {{ background: #b00020; }}
+    table {{ border-collapse: collapse; width: 100%; font-size: 0.92em; }}
+    th, td {{ border: 1px solid #2a3a5e; padding: 6px; text-align: center; }}
+    th {{ background: #0f3460; }}
+    input[type=number] {{ width: 4em; padding: 0.3em; background: #0f3460; color: #eee; border: 1px solid #2a3a5e; }}
+    .toolbar {{ display: flex; gap: 0.5em; align-items: center; }}
+    a {{ color: #e94560; }}
+</style>
+</head>
+<body>
+<div class="container">
+    <p><a href="/admin">← Назад к дашборду</a></p>
+    <h1>📥 Очередь черновиков</h1>
+    <input type="hidden" name="csrf_token" value="{csrf_token}">
+
+    <div class="card">
+        <h3>🧹 Массовая чистка</h3>
+        <div class="toolbar">
+            <label>Reject pending старше</label>
+            <input type="number" id="purgeDays" value="3" min="1" max="365">
+            <label>дней</label>
+            <button type="button" class="danger" onclick="purgeOld()">Запустить</button>
+        </div>
+        <div id="purgeMsg" style="margin-top: 0.7em;"></div>
+    </div>
+
+    <div class="card">
+        <h3>📰 News pending ({len(news_pending)})</h3>
+        <table>
+            <tr><th>Created</th><th>Source</th><th>Sector</th><th>Impact</th><th>Title</th><th></th></tr>
+            {news_rows}
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>✍️ Author notes pending ({len(notes_pending)})</h3>
+        <table>
+            <tr><th>Created</th><th>Rubric</th><th>Preview</th><th></th></tr>
+            {notes_rows}
+        </table>
+    </div>
+</div>
+<script>
+    var CSRF = "{csrf_token}";
+
+    async function _post(url, body) {{
+        var form = new FormData();
+        form.append("csrf_token", CSRF);
+        for (var k in body) form.append(k, body[k]);
+        var r = await fetch(url, {{ method: "POST", body: form }});
+        return r.json();
+    }}
+
+    async function rejectNews(did) {{
+        var r = await _post("/admin/queue/reject", {{ kind: "news", draft_id: did }});
+        if (r.status === "ok") location.reload(); else alert("Ошибка: " + r.detail);
+    }}
+
+    async function rejectNote(did) {{
+        var r = await _post("/admin/queue/reject", {{ kind: "author_note", draft_id: did }});
+        if (r.status === "ok") location.reload(); else alert("Ошибка: " + r.detail);
+    }}
+
+    async function purgeOld() {{
+        var days = document.getElementById("purgeDays").value;
+        if (!confirm("Reject все pending старше " + days + " дней?")) return;
+        var r = await _post("/admin/queue/purge_older_than", {{ days: days }});
+        var msg = document.getElementById("purgeMsg");
+        if (r.status === "ok") {{
+            msg.textContent = "✅ Reject: news=" + r.news + ", author_notes=" + r.author_notes;
+            setTimeout(function() {{ location.reload(); }}, 1500);
+        }} else {{
+            msg.textContent = "❌ " + r.detail;
+        }}
+    }}
+</script>
+</body>
+</html>"""
+    response = HTMLResponse(content=page)
+    response.set_cookie(
+        CSRF_COOKIE, csrf_token,
+        httponly=False, samesite="strict", max_age=3600,
+    )
+    return response
+
+
+@app.post("/admin/queue/reject")
+async def queue_reject(
+    request: Request,
+    kind: str = Form(...),
+    draft_id: str = Form(...),
+    csrf_token: str = Form(""),
+    auth=Depends(authenticate),
+):
+    _verify_csrf(request, csrf_token)
+    if kind == "news":
+        ok = _reject_news_draft(draft_id)
+    elif kind == "author_note":
+        ok = _reject_author_note_draft(draft_id)
+    else:
+        return {"status": "error", "detail": f"unknown kind: {kind}"}
+    if not ok:
+        return {"status": "error", "detail": "draft not found or not pending"}
+    return {"status": "ok", "detail": f"{kind} rejected"}
+
+
+@app.post("/admin/queue/purge_older_than")
+async def queue_purge(
+    request: Request,
+    days: int = Form(...),
+    csrf_token: str = Form(""),
+    auth=Depends(authenticate),
+):
+    _verify_csrf(request, csrf_token)
+    if days < 1 or days > 365:
+        return {"status": "error", "detail": "days must be 1..365"}
+    res = _purge_older_than(days)
+    return {"status": "ok", "news": res["news"], "author_notes": res["author_notes"]}
 
 
 if __name__ == "__main__":
