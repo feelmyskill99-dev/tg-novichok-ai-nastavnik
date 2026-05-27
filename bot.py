@@ -1186,6 +1186,82 @@ class Publisher:
                 chart_file = CHARTS_DIR / f"chart_{datetime.utcnow():%Y%m%d_%H%M}.png"
                 chart_path = make_chart(df, chart_file)
 
+        # === Stage 14e — morning_briefing ===========================================
+        # Если это утренний слот И нормальный режим (есть данные рынка) — собираем
+        # формат «Доброе утро + 5 новостей» БЕЗ Claude (детерминированный HTML).
+        # Подсмотрено у @invest_zonaa и @Coin_Post. Заменяет голый chart-only пост.
+        if source == "scheduled_morning" and mode == "normal":
+            try:
+                from core.morning_briefing import (
+                    build_morning_briefing_html as _build_briefing,
+                    fetch_top_news_for_briefing as _fetch_top_news,
+                )
+                from core.fear_greed import fetch_fear_greed as _fetch_fg
+
+                top_news = _fetch_top_news(NEWS_DRAFTS_FILE)
+                fg_value, fg_label = _fetch_fg(state_path=ROOT / "state.json")
+                partner_url_with_utm = ""
+                if PARTNER_URL:
+                    try:
+                        from core.partner_link import build_partner_url as _bpu
+                        partner_url_with_utm = _bpu(
+                            PARTNER_URL, post_type="morning", post_id="briefing",
+                        )
+                    except Exception as e:
+                        log.warning("morning: partner_link build failed: %s", e)
+                        partner_url_with_utm = PARTNER_URL
+                briefing_html = _build_briefing(
+                    market_snapshot=market_snapshot,
+                    top_news=top_news,
+                    fg_index=fg_value,
+                    fg_label=fg_label,
+                    partner_url=partner_url_with_utm,
+                    bot_username="",  # CTA «пиши в @bot» отключен — бот не принимает Q&A
+                    channel_id_for_links=CHANNEL_ID or "",
+                )
+                # Отправляем как post с chart-картинкой
+                sent_msg = None
+                try:
+                    sent_msg = await send_post_with_optional_image(
+                        self.bot, self._target_chat(), briefing_html,
+                        str(chart_path) if chart_path else None,
+                        reply_markup=None,
+                    )
+                except Exception as e:
+                    log.exception("morning briefing send failed: %s", e)
+                    return
+
+                # Учёт в state и content_mix_log
+                state["post_count"] = post_num
+                save_state(state)
+                _log_post_event(
+                    "morning_briefing",
+                    published_to=("channel" if not DRY_RUN else "owner"),
+                    title="Доброе утро + новости ночи",
+                    source=source,
+                    message_id=sent_msg.message_id if sent_msg else None,
+                )
+                # Минимальная запись в history.json для memory_context следующих постов
+                append_history({
+                    "datetime": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+                    "post_type": "morning_briefing",
+                    "asset": market_snapshot.get("symbol", "BTC/USDT"),
+                    "market_snapshot": market_snapshot,
+                    "short_summary": briefing_html[:240],
+                    "final_text": briefing_html,
+                    "partner_used": bool(partner_url_with_utm),
+                    "source": source,
+                })
+                log.info(
+                    "morning briefing sent: news=%d, fg=%s, len=%d",
+                    len(top_news), fg_value, len(briefing_html),
+                )
+                return
+            except Exception as e:
+                # Если morning_briefing упал — fallback в обычный flow (Claude post).
+                log.exception("morning briefing failed, falling back to claude flow: %s", e)
+        # === end Stage 14e ==========================================================
+
         # --- memory context ---
         memory_context = [
             {
