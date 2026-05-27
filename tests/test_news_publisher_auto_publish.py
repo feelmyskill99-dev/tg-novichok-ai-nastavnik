@@ -79,9 +79,10 @@ def _make_valid_v2_payload() -> dict:
 class _FakeDedup:
     """Мок NewsDeduplicator: всё in-memory, без файлов."""
 
-    def __init__(self, *, posted_today_count: int = 0):
+    def __init__(self, *, posted_today_count: int = 0, posted_today_in_sector_count: int = 0):
         self.is_duplicate_value = False
         self._posted_today = posted_today_count
+        self._posted_today_in_sector = posted_today_in_sector_count
         self.remembered: list[tuple[str, str]] = []  # (decision, title)
 
     def is_duplicate(self, item):
@@ -92,6 +93,9 @@ class _FakeDedup:
 
     def posted_today(self, *, only_channel: bool = False):
         return self._posted_today
+
+    def posted_today_in_sector(self, sector, *, only_channel: bool = False):
+        return self._posted_today_in_sector
 
 
 class _SendRecorder:

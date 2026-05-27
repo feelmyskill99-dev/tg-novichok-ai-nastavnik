@@ -1315,6 +1315,12 @@ class Publisher:
 app = FastAPI()
 _publisher_holder: dict = {"p": None}
 
+# Stage 14d: ёмкость для message_id последней auto-news публикации.
+# _news_send его записывает, _safe_news_scan_job читает и пробрасывает
+# в _log_post_event(message_id=...). Не thread-safe, но scheduler у нас
+# single-threaded asyncio.
+_last_auto_news_msg_id: dict = {"v": None}
+
 
 @app.post("/webhook")
 async def webhook(req: Request):
@@ -3519,9 +3525,10 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
             # кнопки оставляем — владелец доделает и нажмёт ещё раз
             return
 
+        sent_msg = None
         try:
             cj = draft.claude_json or {}
-            await send_post_with_optional_image(
+            sent_msg = await send_post_with_optional_image(
                 cb.bot, CHANNEL_ID, draft.post_html,
                 draft.image_path or None,
                 title=str(cj.get("specific_title") or ""),
@@ -3570,6 +3577,7 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
             log.warning("news_publish: history.remember failed: %s", e)
         # Stage 10+: учёт в контент-миксе. post_type — sector выбранной новости
         # (ai_crypto / scam_radar / political_market_noise / ...), category свернётся в "news".
+        # Stage 14d: пробрасываем message_id для daily_digest ссылок.
         try:
             sn = draft.source_news or {}
             _log_post_event(
@@ -3577,6 +3585,7 @@ def _register_news_callbacks(dp: Dispatcher) -> None:
                 published_to="channel",
                 title=(sn.get("title") or "")[:120],
                 source="news_callback",
+                message_id=sent_msg.message_id if sent_msg else None,
             )
         except Exception:
             pass
@@ -4218,7 +4227,7 @@ async def send_post_with_optional_image(
     title: Optional[str] = None,
     brief: Optional[str] = None,
     reply_markup=None,
-) -> None:
+):
     """Универсальная отправка post + optional image (Stage 12d).
 
     Использует одно из трёх:
@@ -4228,10 +4237,16 @@ async def send_post_with_optional_image(
     - send_photo с short caption + send_message с полным text — если caption
       не помещается. Кнопки идут на ВТОРОЕ (текстовое) сообщение, чтобы они
       были рядом с полным разбором.
+
+    Stage 14d: возвращает финальный Message объект (то, что увидит читатель
+    последним — для photo+caption это сам photo; для split-чанков —
+    последний chunk). Caller'ы, которым не нужен message_id, могут
+    игнорировать (как было раньше — None-возврат сохранил бы поведение,
+    но для message_id-проброс возвращаем Message).
     """
     if not chat_id:
         log.warning("send_post: chat_id пустой, skip")
-        return
+        return None
 
     img: Optional[Path] = None
     if image_path:
@@ -4247,24 +4262,22 @@ async def send_post_with_optional_image(
     if img is None:
         chunks = split_html_for_telegram(post_html, limit=TELEGRAM_MESSAGE_LIMIT)
         if not chunks:
-            return
+            return None
         last_idx = len(chunks) - 1
+        last_msg = None
         for i, chunk in enumerate(chunks):
-            await bot.send_message(
+            last_msg = await bot.send_message(
                 chat_id, chunk,
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
                 reply_markup=reply_markup if i == last_idx else None,
             )
-        return
+        return last_msg
 
     photo = FSInputFile(str(img))
 
     # Stage 14: всегда photo+caption одним сообщением, без split.
-    # Upstream (truncate cascade + final_caption_guard в news pipeline,
-    # caption-fit в market posts) гарантирует ≤ 1024 chars.
-    # Если caption > 1024 — это баг upstream, падаем с TelegramBadRequest.
-    await bot.send_photo(
+    return await bot.send_photo(
         chat_id, photo,
         caption=post_html,
         parse_mode=parse_mode,
@@ -4280,8 +4293,19 @@ async def _news_send(
     text: str,
     image_path: Optional[str] = None,
 ) -> None:
-    """Адаптер под NewsPublisher.SendFn — делегирует в universal helper."""
-    await send_post_with_optional_image(bot, chat_id, text, image_path, reply_markup=None)
+    """Адаптер под NewsPublisher.SendFn — делегирует в universal helper.
+
+    Stage 14d: запоминаем message_id последней auto-публикации в
+    _last_auto_news_msg_id чтобы _safe_news_scan_job мог пробросить
+    его в _log_post_event. Контракт SendFn (Awaitable[None]) не
+    меняем, чтобы не задеть тесты.
+    """
+    msg = await send_post_with_optional_image(bot, chat_id, text, image_path, reply_markup=None)
+    if chat_id and CHANNEL_ID and str(chat_id) == str(CHANNEL_ID):
+        try:
+            _last_auto_news_msg_id["v"] = msg.message_id if msg else None
+        except Exception:
+            pass
 
 
 async def _news_preview_send(
@@ -4456,16 +4480,20 @@ async def run_news_now_cmd() -> None:
         )
         log.info("news_now result: %s", result)
         # Stage 10+: учёт в контент-миксе
+        # Stage 14d: подхватываем message_id, который _news_send положил
+        # в _last_auto_news_msg_id, для будущих daily_digest ссылок.
         try:
             decision = (result or {}).get("decision")
             sector = (result or {}).get("sector") or "news"
             title = (result or {}).get("chosen_title") or ""
+            auto_msg_id = _last_auto_news_msg_id.pop("v", None) if isinstance(_last_auto_news_msg_id, dict) else None
             if decision == "preview_sent":
                 _log_post_event(sector, published_to="owner",
                                 title=title, source="news_scan")
             elif decision == "published_channel":
                 _log_post_event(sector, published_to="channel",
-                                title=title, source="news_scan")
+                                title=title, source="news_scan",
+                                message_id=auto_msg_id)
             elif decision == "sent_owner":
                 _log_post_event(sector, published_to="owner",
                                 title=title, source="news_scan")
