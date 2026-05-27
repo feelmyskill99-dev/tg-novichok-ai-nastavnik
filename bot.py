@@ -1378,17 +1378,27 @@ async def run_scheduler_forever() -> None:
     # Stage 13: 10:00 ежедневно — market_chart; вечером 19:00 пн-сб —
     # education (выравнивание content-mix к плану 40/20/15/15/10);
     # вс 19:00 — weekly_diary (отдельным job ниже).
+    #
+    # misfire_grace_time=14400 + coalesce=True: если бот рестартовал ПОСЛЕ
+    # 10:00 (например, комп был выключен ночью), apscheduler всё равно
+    # отстреляет утренний/вечерний слот при старте — окно 4 часа.
+    # Без этого слот молча пропадал (см. диагностика 2026-05-27:
+    # 3 scheduled_morning за 30 дней при cron'е daily).
+    SCHED_GRACE_S = 14400  # 4 часа
     sched.add_job(_safe_publish, "cron",
                   hour=POST_MORNING_HOUR, minute=0,
-                  args=[publisher, sentinel, "scheduled_morning"])
+                  args=[publisher, sentinel, "scheduled_morning"],
+                  misfire_grace_time=SCHED_GRACE_S, coalesce=True)
     sched.add_job(_safe_publish, "cron",
                   day_of_week="mon-sat",
                   hour=POST_EVENING_HOUR, minute=0,
-                  args=[publisher, sentinel, "scheduled_evening_education"])
+                  args=[publisher, sentinel, "scheduled_evening_education"],
+                  misfire_grace_time=SCHED_GRACE_S, coalesce=True)
     sched.add_job(
         _safe_mistake_report_job, "cron",
         day_of_week="sun", hour=12, minute=0,
-        args=[publisher.bot, mistake_tracker]
+        args=[publisher.bot, mistake_tracker],
+        misfire_grace_time=SCHED_GRACE_S, coalesce=True,
     )
 
     # news scan job — включается только если ENABLE_NEWS=true в .env

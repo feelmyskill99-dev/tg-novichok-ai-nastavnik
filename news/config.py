@@ -28,6 +28,10 @@ class NewsConfig:
     news_min_impact_score: int = 75
     news_max_posts_per_day: int = 3
     news_max_reviews_per_day: int = 6
+    # Stage 14b: лимит постов в один день внутри одного sector'а.
+    # Защищает от перекоса (27.04: 4 stablecoin-поста подряд за час).
+    # 0 = выключено.
+    news_max_posts_per_sector_per_day: int = 2
     news_lookback_hours: int = 12
     news_scan_interval_minutes: int = 60
 
@@ -76,6 +80,7 @@ class NewsConfig:
             news_min_impact_score=_int("NEWS_MIN_IMPACT_SCORE", 75),
             news_max_posts_per_day=_int("NEWS_MAX_POSTS_PER_DAY", 3),
             news_max_reviews_per_day=_int("NEWS_MAX_REVIEWS_PER_DAY", 6),
+            news_max_posts_per_sector_per_day=_int("NEWS_MAX_POSTS_PER_SECTOR_PER_DAY", 2),
             news_lookback_hours=_int("NEWS_LOOKBACK_HOURS", 12),
             news_scan_interval_minutes=_int("NEWS_SCAN_INTERVAL_MINUTES", 60),
 
