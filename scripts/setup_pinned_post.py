@@ -89,7 +89,7 @@ def build_pinned_html(partner_url: str = "") -> str:
     if partner_url:
         link = build_partner_url(partner_url, post_type="pinned", post_id="welcome")
         parts.append("")
-        parts.append(f"Работаю на Gate.io: <a href=\"{_esc(link)}\">{_esc(link)}</a>")
+        parts.append(f"📈 <b><a href=\"{_esc(link)}\">Я торгую здесь → Gate.io</a></b>")
 
     parts.append("")
     parts.append("<i>Не финсовет. Это дневник обучения и AI-разбор.</i>")
@@ -122,6 +122,20 @@ async def _publish_and_pin(token: str, channel_id: str, text: str) -> int:
         await bot.session.close()
 
 
+async def _edit_existing(token: str, channel_id: str, message_id: int, text: str) -> None:
+    bot = Bot(token=token, session=_ThreadedResolverSession())
+    try:
+        await bot.edit_message_text(
+            chat_id=channel_id,
+            message_id=message_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    finally:
+        await bot.session.close()
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Опубликовать и закрепить «О чём канал» пост")
@@ -129,6 +143,8 @@ def main() -> int:
                         help="реально публиковать и закрепить (по умолчанию dry-run)")
     parser.add_argument("--dry-run-text", action="store_true",
                         help="только напечатать собранный HTML")
+    parser.add_argument("--edit", action="store_true",
+                        help="отредактировать уже опубликованный pinned (PINNED_MESSAGE_ID из .env)")
     args = parser.parse_args()
 
     token = (os.getenv("TELEGRAM_TOKEN") or "").strip()
@@ -146,6 +162,16 @@ def main() -> int:
     print(f"length: {len(text)} chars (limit text 4096 / caption 1024)")
 
     if args.dry_run_text:
+        return 0
+
+    if args.edit:
+        pinned_id_raw = (os.getenv("PINNED_MESSAGE_ID") or "").strip()
+        if not pinned_id_raw.isdigit():
+            print("PINNED_MESSAGE_ID не задан в .env — нечего редактировать", file=sys.stderr)
+            return 1
+        asyncio.run(_edit_existing(token, channel_id, int(pinned_id_raw), text))
+        print()
+        print(f"OK — отредактирован pinned message_id={pinned_id_raw}")
         return 0
 
     if not args.apply:
