@@ -345,12 +345,21 @@ def image_prompt_for(item: NewsItem, claude_hint: str = "") -> str:
     return base
 
 
+_TICKER_HASHTAG_WHITELIST = frozenset({
+    "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "TON", "TRX",
+    "AVAX", "DOT", "MATIC", "LINK", "LTC", "HYPE", "NEAR", "ATOM",
+    "ARB", "OP", "SUI", "APT", "INJ", "PEPE", "SHIB", "WLD",
+})
+
+
 def merge_hashtags(claude_tags: list[str], sector: str, assets: list[str]) -> list[str]:
     """Stage 14 — мерж хэштегов для v2 поста, max 4.
 
     Порядок:
     1. Sector rubric (из SECTOR_RUBRIC) — всегда первый, 1 слот
-    2. Asset tags (#BTC, #ETH) из assets[:2] — макс 2 слота
+    2. Asset tags из assets[:2] — макс 2 слота, whitelist популярных тикеров
+       (Stage 14c — расширили с {BTC, ETH} до 25 крупных, чтобы попадать
+       в поиск Telegram, как делают @crypto_hd и @invest_zonaa)
     3. Claude thematic tags — добивают до total ≤ 4
     4. Дедупликация регистронезависимая с сохранением порядка
     """
@@ -361,8 +370,9 @@ def merge_hashtags(claude_tags: list[str], sector: str, assets: list[str]) -> li
         tags.append(rubric)
 
     for a in (assets or [])[:2]:
-        if a in ("BTC", "ETH"):
-            tags.append(f"#{a}")
+        a_upper = (a or "").strip().upper()
+        if a_upper in _TICKER_HASHTAG_WHITELIST:
+            tags.append(f"#{a_upper}")
 
     for t in (claude_tags or []):
         t = str(t).strip()
