@@ -1197,6 +1197,10 @@ class Publisher:
                     fetch_top_news_for_briefing as _fetch_top_news,
                 )
                 from core.fear_greed import fetch_fear_greed as _fetch_fg
+                from core.reaction_poll import (
+                    build_poll_block as _build_poll,
+                    pick_morning_poll as _pick_poll,
+                )
 
                 top_news = _fetch_top_news(NEWS_DRAFTS_FILE)
                 fg_value, fg_label = _fetch_fg(state_path=ROOT / "state.json")
@@ -1210,6 +1214,18 @@ class Publisher:
                     except Exception as e:
                         log.warning("morning: partner_link build failed: %s", e)
                         partner_url_with_utm = PARTNER_URL
+
+                # Stage 14f — reaction-опрос с ротацией по дню месяца.
+                # Если build_poll вернёт "" — briefing рендерится без секции.
+                _poll_html = ""
+                try:
+                    _q, _opts = _pick_poll(
+                        datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+                    )
+                    _poll_html = _build_poll(_q, _opts)
+                except Exception as e:
+                    log.warning("morning: poll build failed (fail-open): %s", e)
+
                 briefing_html = _build_briefing(
                     market_snapshot=market_snapshot,
                     top_news=top_news,
@@ -1218,6 +1234,7 @@ class Publisher:
                     partner_url=partner_url_with_utm,
                     bot_username="",  # CTA «пиши в @bot» отключен — бот не принимает Q&A
                     channel_id_for_links=CHANNEL_ID or "",
+                    poll_block=_poll_html,
                 )
                 # Отправляем как post с chart-картинкой
                 sent_msg = None
